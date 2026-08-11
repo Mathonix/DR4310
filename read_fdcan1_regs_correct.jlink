@@ -1,8 +1,0 @@
-si SWD
-device STM32G431KB
-speed 50
-connect
-h
-mem32 0x40006400,32
-g
-q

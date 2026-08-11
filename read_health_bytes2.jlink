@@ -1,8 +1,0 @@
-si SWD
-device STM32G431KB
-speed 1000
-connect
-h
-mem8 0x20000628,20
-g
-q
