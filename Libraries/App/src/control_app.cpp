@@ -39,7 +39,7 @@ constexpr float kBusMinEnableV = 6.0f;
 /* Require continuous good bus samples before arming FOC after boot/mode entry. */
 constexpr uint16_t kBusOkSettleMs = 50U;
 constexpr float kOpenLoopRampRadS2 = 10.0f;
-constexpr float kCurrentTestRampAS = 0.50f;
+constexpr float kCurrentTestRampAS = 100.0f;
 constexpr float kSpeedRefRampRadS2 = 3.1416f; /* ~30 rpm/s */
 constexpr float kCurrentLoopOmegaC = 1200.0f;
 constexpr float kIqSoftLimitA = 2.50f;
