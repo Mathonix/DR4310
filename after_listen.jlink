@@ -1,0 +1,7 @@
+si SWD
+device STM32G431KB
+speed 4000
+connect
+mem32 0x200003A8,6
+mem32 0x200003D0,6
+q

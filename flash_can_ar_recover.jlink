@@ -1,0 +1,16 @@
+si SWD
+device STM32G431KB
+speed 4000
+connect
+h
+loadfile build\Debug\4310_G431KBT6.elf
+r
+g
+sleep 2500
+// status,tx,rx,err,rx_id
+mem32 0x200003A8,4
+// activity,bus_off,warn,passive,tec,rec
+mem32 0x200003D0,6
+// control_mode_cmd
+mem8 0x20000400,1
+q

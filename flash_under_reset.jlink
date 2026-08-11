@@ -1,0 +1,16 @@
+si SWD
+device STM32G431KB
+speed 1000
+RSetType 2
+connect
+halt
+w4 0xE000EDFC, 0xA05F0001
+halt
+mem32 0x40020000,1
+w4 0x40020008,0x00000000
+w4 0x4002000C,0x00000000
+w4 0x40012408,0x00000000
+loadfile build\Debug\4310_G431KBT6.hex
+r
+g
+q

@@ -1,0 +1,10 @@
+si SWD
+device STM32G431KB
+speed 100
+connect
+mem32 0x20000424 10
+sleep 100
+mem32 0x20000424 10
+sleep 100
+mem32 0x20000424 10
+q

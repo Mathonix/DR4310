@@ -1,0 +1,35 @@
+si SWD
+device STM32G431KB
+speed 1000
+connect
+h
+// Read pre-calibration mode, direction, zero, telemetry and bus/fault state.
+mem8 0x20000400,8
+mem8 0x20000034,1
+mem32 0x2000041C,1
+mem32 0x2000043C,22
+// Force all modes idle, then request QDrive-style electrical zero calibration.
+w1 0x20000400,0x00
+w1 0x20000401,0x00
+w1 0x20000402,0x00
+w1 0x20000403,0x00
+w1 0x20000404,0x00
+w1 0x20000405,0x00
+w1 0x20000406,0x00
+w1 0x20000407,0x00
+w4 0x20000408,0x00000000
+w1 0x20000400,0x0D
+w1 0x20000401,0x01
+w1 0x20000407,0x01
+g
+sleep 15000
+h
+// Read final mode/flags, direction, zero, telemetry, calibration internals.
+mem8 0x20000400,8
+mem8 0x20000034,1
+mem32 0x2000041C,1
+mem32 0x2000043C,22
+mem8 0x200004FE,8
+mem32 0x20000508,5
+g
+q

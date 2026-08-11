@@ -1,0 +1,15 @@
+si SWD
+device STM32G431KB
+speed 4000
+connect
+h
+// Already calibrated on previous reset; dump broader RAM for mid-rail zeros
+// Search pattern: consecutive floats near 1.5..1.7 (0x3FC00000..0x3FD9999A)
+mem32 0x20000000,128
+mem32 0x20000200,128
+mem32 0x20000400,128
+mem32 0x20000600,128
+// Identity
+mem32 0x08000000,2
+g
+q

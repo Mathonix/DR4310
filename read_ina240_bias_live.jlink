@@ -1,0 +1,21 @@
+si SWD
+device STM32G431KB
+speed 4000
+connect
+// Soft reset and let firmware run calibration
+r
+g
+sleep 2500
+h
+// Map addresses from current build (ia_zero_v, ib_zero_v, inv_gain, raw_to_v_scale)
+mem32 0x20000054,4
+// Scan low .data/.bss for floats near mid-rail 1.65V (0x3FDxxxxx)
+mem32 0x20000000,64
+// Scan more .data region
+mem32 0x20000100,64
+// DMA-ish high BSS
+mem32 0x20000600,80
+// Vector table / app start check
+mem32 0x08000000,4
+g
+q

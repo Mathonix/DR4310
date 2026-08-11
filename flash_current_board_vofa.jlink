@@ -1,0 +1,9 @@
+device STM32G431KB
+si SWD
+speed 1000
+connect
+h
+loadfile build\Debug\4310_G431KBT6.elf
+r
+g
+q

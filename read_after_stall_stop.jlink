@@ -1,0 +1,12 @@
+si SWD
+device STM32G431KB
+speed 50
+connect
+h
+mem8 0x20000010,8
+mem32 0x20000024,4
+mem32 0x20000380,10
+mem32 0x200003b0,16
+mem32 0x48001410,1
+g
+q

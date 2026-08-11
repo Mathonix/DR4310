@@ -1,0 +1,11 @@
+si SWD
+device STM32G431KB
+speed 1000
+connect
+halt
+w4 0x48001418,0x00000001
+loadfile build\Debug\4310_G431KBT6.hex
+verifybin build\Debug\4310_G431KBT6.bin,0x08000000
+r
+g
+q

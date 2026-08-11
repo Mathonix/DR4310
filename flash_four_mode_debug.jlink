@@ -1,0 +1,40 @@
+si SWD
+device STM32G431KB
+speed 4000
+connect
+h
+loadfile build\Debug\4310_G431KBT6.elf
+r
+g
+sleep 1500
+h
+// can_node_id
+mem8 0x2000000C,1
+// control_mode_cmd, control_enable, open_loop, current_test, align, pos, ident
+mem8 0x200003FC,8
+// can_control_mode, last_cmd, rx_count, target
+mem8 0x200003E8,2
+mem32 0x200003EC,1
+mem32 0x200003F0,1
+// telemetry: angle,vel,accel,accel_ref,ia,ib,iq_ref,iq,id,vd,vq,bus
+mem32 0x20000430,12
+// telemetry: position, position_ref, loop_count, isr_count, fault_flags, mode
+mem32 0x2000046C,6
+// speed_ref_applied, active_vel_ref
+mem32 0x200004C0,2
+// last_control_mode, encoder_valid
+mem8 0x200004C8,1
+mem8 0x200004D0,1
+// position_unwrapped
+mem32 0x200004D4,1
+// foc: id_ref,iq_ref,id,iq,vd,vq + enabled at end-ish; dump first floats + isr
+mem32 0x200004E8,8
+// motion: angle,vel,accel,vel_ref,accel_ref,iq_ref
+mem32 0x200005B0,7
+// can_test_tx/rx counts
+mem32 0x200003AC,2
+// can_test_status / protocol bus_off
+mem32 0x200003A8,1
+mem32 0x200003D4,1
+g
+q

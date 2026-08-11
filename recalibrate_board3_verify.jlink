@@ -1,0 +1,30 @@
+si SWD
+device STM32G431KB
+speed 4000
+connect
+h
+r
+g
+// Longer settle for this firmware / board
+sleep 4000
+h
+// Identity
+mem32 0x08000000,2
+// Local-map style zeros: ia@54 ib@58 inv_gain@5c raw_to_v@60
+mem32 0x20000050,8
+// Nearby control constants
+mem32 0x20000000,32
+// Candidate mid-rail copies seen earlier
+mem32 0x200004B0,8
+mem32 0x200005D0,8
+// Pointers near scale constants
+mem32 0x20000060,8
+// Probe likely DMA/raw regions
+mem16 0x20000700,32
+mem16 0x20000710,32
+mem16 0x20000778,32
+mem16 0x200007E0,32
+// Control flags if present
+mem8 0x20000400,32
+g
+q

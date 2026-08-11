@@ -1,0 +1,16 @@
+si SWD
+device STM32G431KB
+speed 4000
+connect
+halt
+regs
+mem32 0x200003A8,20
+// FOC isr / loop if telemetry still around 0x20000470 area - re-find
+mem32 0x20000400,8
+// FDCAN1 base 0x4000A400 on G4? check CCCR/PSR/ECR/TXFQS
+// STM32G431 FDCAN1 = 0x40006400
+mem32 0x40006400,8
+mem32 0x4000640C,4
+mem32 0x40006440,8
+g
+q

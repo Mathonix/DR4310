@@ -1,0 +1,18 @@
+si SWD
+device STM32G431KB
+speed 4000
+connect
+r
+h
+loadfile build\Debug\4310_G431KBT6.elf
+verifybin build\Debug\4310_G431KBT6.bin,0x08000000
+r
+g
+sleep 1500
+h
+mem8 0x20000400,8
+mem8 0x20000034,1
+mem32 0x2000041C,1
+mem32 0x2000043C,8
+mem32 0x2000045C,8
+q

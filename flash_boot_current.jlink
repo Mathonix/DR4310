@@ -1,0 +1,15 @@
+si SWD
+device STM32G431KB
+speed 4000
+connect
+h
+loadfile build\Debug\4310_G431KBT6.hex
+r
+g
+sleep 1500
+h
+mem8 control_mode_cmd,1
+mem8 control_current_test_enable,1
+mem8 control_enable,1
+mem32 control_current_test_iq_ref_a,1
+q

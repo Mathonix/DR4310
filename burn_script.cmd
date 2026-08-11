@@ -1,0 +1,1 @@
+J-Link.exe -device STM32G431CB -speed 4000 -port COM5 -CommanderScript "download" -Exit

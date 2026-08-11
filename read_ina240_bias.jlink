@@ -1,0 +1,16 @@
+si SWD
+device STM32G431KB
+speed 1000
+connect
+halt
+// INA240 zero bias: ia_zero_v @0x20000054, ib_zero_v @0x20000058
+// inv_gain @0x2000005c, raw_to_v_scale @0x20000060
+mem32 0x20000054,4
+// adc_dma raw [Ia,Ib,Vbus] @0x200006f4
+mem16 0x200006f4,4
+// configured, hw_running
+mem8 0x200006fc,2
+// sample_seq
+mem32 0x20000700,1
+g
+q

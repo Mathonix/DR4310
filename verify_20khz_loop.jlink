@@ -1,0 +1,40 @@
+si SWD
+device STM32G431KB
+speed 4000
+connect
+r
+h
+loadfile build\Debug\4310_G431KBT6.hex
+r
+g
+sleep 1000
+h
+// Read foc.isr_count and overrun/fault. FOCState:
+// floats first 15*4=60, then 4 uint8, then floats angle_override etc, isr_count after open_loop fields
+// From nm foc @200004b4 size was 0x58 before, check map
+mem32 0x200004b4,24
+mem32 0x20000558,6
+// flags
+mem8 0x20000010,2
+// Enable current test 0.5A
+w1 0x20000010,0x01
+w1 0x20000011,0x01
+w1 0x20000403,0x00
+w4 0x2000040c,0x3F000000
+g
+sleep 500
+h
+// Snapshot isr_count after 0.5s
+mem32 0x200004b4,24
+g
+sleep 500
+h
+// Snapshot isr_count after another 0.5s -> delta should be ~10000 for 20kHz
+mem32 0x200004b4,24
+mem32 0x20000420,20
+// disable
+w1 0x20000011,0x00
+w1 0x20000010,0x00
+w4 0x2000040c,0x00000000
+g
+q
