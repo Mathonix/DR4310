@@ -9,7 +9,7 @@ namespace {
 /* Current board current/phase map: positive Iq produces positive encoder
  * velocity, so speed->Iq stays positive. */
 constexpr float kSpeedIqSign = 1.0f;
-constexpr float kIqRefSlewAPerS = 5.0f;
+constexpr float kIqRefSlewAPerS = 1000.0f;
 }
 
 void SpeedController::init(float kp, float ki, float iq_limit_a) {

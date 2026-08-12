@@ -32,7 +32,7 @@ void OnProjectLoad (void) {
   //
   // User settings
   //
-  File.Open ("$(ProjectDir)/build/Debug/4310_G431KBT6.elf");
+  File.Open ("$(ProjectDir)/build/Release/4310_G431KBT6.elf");
 }
 
 /*********************************************************************

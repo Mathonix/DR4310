@@ -17,3 +17,7 @@ __pycache__/
 *.jlink
 
 !.settings/
+
+# Local task and report notes
+/task/
+/report/

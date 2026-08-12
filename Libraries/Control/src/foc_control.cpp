@@ -163,6 +163,7 @@ void FocController::Init(TIM_HandleTypeDef *htim) {
   state_.invalid_sample_count = 0U;
   state_.overcurrent_trip_count = 0U;
   vmax_div_ = 0U;
+  angle_direct_enable_ = 0U;
   SetCurrentPi(kDefaultCurrentKp,
                kDefaultCurrentKi,
                kDefaultCurrentOutLimitV);
@@ -234,6 +235,12 @@ void FocController::SetRefs(float id_ref_a, float iq_ref_a) {
 }
 
 void FocController::SetElectricalAngle(float electrical_angle_rad) {
+  angle_direct_enable_ = 0U;
+  state_.electrical_angle_rad = Wrap0To2Pi(electrical_angle_rad);
+}
+
+void FocController::SetDirectElectricalAngle(float electrical_angle_rad) {
+  angle_direct_enable_ = 1U;
   state_.electrical_angle_rad = Wrap0To2Pi(electrical_angle_rad);
 }
 
@@ -312,11 +319,14 @@ void FocController::OnPwmUpdate() {
     current_loop_.setOutputLimits(-cached_vmax_, cached_vmax_);
   }
 
-  const float electrical_angle =
-      state_.angle_override_enable != 0U
-          ? state_.angle_override_rad
-          : Wrap0To2Pi(state_.electrical_angle_rad +
-                       (state_.omega_e_rad_s * kFocDtS));
+  float electrical_angle = state_.electrical_angle_rad;
+  if (state_.angle_override_enable != 0U) {
+    electrical_angle = state_.angle_override_rad;
+  } else if (angle_direct_enable_ == 0U) {
+    electrical_angle =
+        Wrap0To2Pi(state_.electrical_angle_rad +
+                   (state_.omega_e_rad_s * kFocDtS));
+  }
   state_.electrical_angle_rad = electrical_angle;
 
   /* One CORDIC cosine call -> cos + sin (shared by Park and InvPark). */

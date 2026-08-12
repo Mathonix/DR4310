@@ -61,6 +61,7 @@ class FocController {
   void SetMaxModulation(float max_mod);
   void SetRefs(float id_ref_a, float iq_ref_a);
   void SetElectricalAngle(float electrical_angle_rad);
+  void SetDirectElectricalAngle(float electrical_angle_rad);
   void SetOmegaE(float omega_e_rad_s);
   void SetAngleOverride(uint8_t enable, float electrical_angle_rad);
   void SetOpenLoopVoltage(uint8_t enable, float vd_v, float vq_v);
@@ -100,6 +101,7 @@ class FocController {
   float pi_out_limit_v_ = 0.0f;
   float cached_vmax_ = 0.0f;
   uint8_t vmax_div_ = 0U;
+  uint8_t angle_direct_enable_ = 0U;
   volatile uint8_t isr_busy_ = 0U;
 };
 

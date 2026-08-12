@@ -28,6 +28,14 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+typedef struct
+{
+  volatile uint32_t code;
+  volatile uint32_t first_timestamp_ms;
+  volatile uint32_t last_timestamp_ms;
+  volatile uint32_t count;
+  volatile uint8_t name[24];
+} LedFaultReport_t;
 
 /* USER CODE END PTD */
 
@@ -97,7 +105,17 @@
 #define MIT_T_MAX               (2.50f)
 #define RPM_TO_RAD_S            0.10471975512f
 #define RAD_S_TO_RPM            9.54929658551f
-#define FAULT_BUS_UNDERVOLT     0x00000008UL
+#define FAULT_CURRENT_SENSE     0x00000001UL
+#define FAULT_OVERCURRENT       0x00000002UL
+#define FAULT_ENCODER_COMM      0x00000004UL
+#define FAULT_ENCODER_CRC       0x00000008UL
+#define FAULT_ENCODER_MAGNET    0x00000010UL
+#define FAULT_DRIVER            0x00000020UL
+#define FAULT_BUS_UNDERVOLT     0x00000040UL
+#define FAULT_BUS_OVERVOLT      0x00000080UL
+#define FAULT_FOC_ISR_OVERRUN   0x00000100UL
+#define FAULT_OUTER_DEADLINE    0x00000200UL
+#define LED_FAULT_COUNT         10U
 #define LED_BLINK_STEP_MS       500U
 #define LED_GROUP_PAUSE_MS      1000U
 #define LED_ON_TIME_MS          120U
@@ -135,6 +153,9 @@ UART_HandleTypeDef huart1;
 /* USER CODE BEGIN PV */
 static uint8_t ws2812_frame[WS2812_FRAME_BYTES];
 static uint8_t ws2812_reset[WS2812_RESET_BYTES];
+volatile LedFaultReport_t g_fault_report[LED_FAULT_COUNT];
+volatile uint32_t g_fault_report_generation = 0U;
+volatile uint32_t g_fault_report_last_flags = 0U;
 volatile uint16_t ina240_adc_raw[INA240_CHANNEL_COUNT];
 volatile uint16_t ina240_adc_mv[INA240_CHANNEL_COUNT];
 volatile uint32_t ina240_sample_count;
@@ -1472,12 +1493,109 @@ static void LED_BootRainbow(void)
   (void)WS2812_SetRGB(0U, 0U, 0U);
 }
 
+static uint8_t LED_GetFaultIndex(const ControlTelemetry_t *control)
+{
+  static const uint32_t codes[LED_FAULT_COUNT] = {
+    FAULT_CURRENT_SENSE,
+    FAULT_OVERCURRENT,
+    FAULT_ENCODER_COMM,
+    FAULT_ENCODER_CRC,
+    FAULT_ENCODER_MAGNET,
+    FAULT_DRIVER,
+    FAULT_BUS_UNDERVOLT,
+    FAULT_BUS_OVERVOLT,
+    FAULT_FOC_ISR_OVERRUN,
+    FAULT_OUTER_DEADLINE,
+  };
+
+  for (uint8_t i = 0U; i < LED_FAULT_COUNT; i++)
+  {
+    if ((control->fault_flags & codes[i]) != 0UL)
+    {
+      return i;
+    }
+  }
+  return 0xFFU;
+}
+
+static void LED_UpdateFaultReport(const ControlTelemetry_t *control)
+{
+  static const uint32_t codes[LED_FAULT_COUNT] = {
+    FAULT_CURRENT_SENSE,
+    FAULT_OVERCURRENT,
+    FAULT_ENCODER_COMM,
+    FAULT_ENCODER_CRC,
+    FAULT_ENCODER_MAGNET,
+    FAULT_DRIVER,
+    FAULT_BUS_UNDERVOLT,
+    FAULT_BUS_OVERVOLT,
+    FAULT_FOC_ISR_OVERRUN,
+    FAULT_OUTER_DEADLINE,
+  };
+  static const char *names[LED_FAULT_COUNT] = {
+    "CURRENT_SENSE",
+    "OVERCURRENT",
+    "ENCODER_COMM",
+    "ENCODER_CRC",
+    "ENCODER_MAGNET",
+    "DRIVER",
+    "BUS_UNDERVOLT",
+    "BUS_OVERVOLT",
+    "FOC_ISR_OVERRUN",
+    "OUTER_DEADLINE",
+  };
+  static uint8_t initialized = 0U;
+
+  if (initialized == 0U)
+  {
+    for (uint8_t i = 0U; i < LED_FAULT_COUNT; i++)
+    {
+      g_fault_report[i].code = codes[i];
+      g_fault_report[i].first_timestamp_ms = 0U;
+      g_fault_report[i].last_timestamp_ms = 0U;
+      g_fault_report[i].count = 0U;
+      for (uint8_t j = 0U; j < sizeof(g_fault_report[i].name); j++)
+      {
+        g_fault_report[i].name[j] = 0U;
+      }
+      for (uint8_t j = 0U; (names[i][j] != '\0') &&
+                           (j < (sizeof(g_fault_report[i].name) - 1U)); j++)
+      {
+        g_fault_report[i].name[j] = (uint8_t)names[i][j];
+      }
+    }
+    initialized = 1U;
+  }
+
+  const uint32_t now = HAL_GetTick();
+  const uint32_t new_faults = control->fault_flags & ~g_fault_report_last_flags;
+  g_fault_report_last_flags = control->fault_flags;
+  for (uint8_t i = 0U; i < LED_FAULT_COUNT; i++)
+  {
+    if ((new_faults & codes[i]) != 0UL)
+    {
+      if (g_fault_report[i].count == 0U)
+      {
+        g_fault_report[i].first_timestamp_ms = now;
+      }
+      g_fault_report[i].last_timestamp_ms = now;
+      g_fault_report[i].count++;
+      g_fault_report_generation++;
+    }
+    else if ((control->fault_flags & codes[i]) != 0UL)
+    {
+      g_fault_report[i].last_timestamp_ms = now;
+    }
+  }
+}
+
 static void LED_StatusUpdate(void)
 {
   static uint8_t last_red = 255U;
   static uint8_t last_green = 255U;
   static uint8_t last_blue = 255U;
   const ControlTelemetry_t *control = ControlApp_GetTelemetry();
+  uint8_t fault_idx = 0xFFU;
   uint8_t red = 0U;
   uint8_t green = 0U;
   uint8_t blue = 0U;
@@ -1485,9 +1603,36 @@ static void LED_StatusUpdate(void)
   uint32_t group_ms;
   uint32_t cycle_ms;
 
-  if ((control->fault_flags & FAULT_BUS_UNDERVOLT) != 0UL)
+  LED_UpdateFaultReport(control);
+  fault_idx = LED_GetFaultIndex(control);
+
+  if (fault_idx < LED_FAULT_COUNT)
   {
-    red = 48U;
+    static const uint8_t fault_colors[LED_FAULT_COUNT][3] = {
+      {48U, 0U, 0U},    /* CURRENT_SENSE: red */
+      {48U, 24U, 0U},   /* OVERCURRENT: orange */
+      {48U, 40U, 0U},   /* ENCODER_COMM: yellow */
+      {40U, 48U, 0U},   /* ENCODER_CRC: yellow-green */
+      {0U, 48U, 24U},   /* ENCODER_MAGNET: green-cyan */
+      {48U, 0U, 40U},   /* DRIVER: magenta */
+      {0U, 24U, 48U},   /* BUS_UNDERVOLT: blue */
+      {0U, 48U, 48U},   /* BUS_OVERVOLT: cyan */
+      {40U, 40U, 40U},  /* FOC_ISR_OVERRUN: white */
+      {24U, 48U, 24U},  /* OUTER_DEADLINE: bright green */
+    };
+    const uint32_t blink_unit_ms = 200U;
+    const uint32_t blink_count = (uint32_t)fault_idx + 1U;
+    const uint32_t active_ms = blink_unit_ms * blink_count;
+    cycle_ms = HAL_GetTick() % (active_ms + 500U);
+    if (cycle_ms < active_ms)
+    {
+      if ((cycle_ms % blink_unit_ms) < 120U)
+      {
+        red = fault_colors[fault_idx][0];
+        green = fault_colors[fault_idx][1];
+        blue = fault_colors[fault_idx][2];
+      }
+    }
   }
   else if ((control_mode_cmd == CTRL_MODE_CURRENT) ||
            (control_mode_cmd == CTRL_MODE_SPEED) ||

@@ -22,6 +22,10 @@ typedef struct
   float angle_deg;
   float velocity_rad_s;
   float accel_rad_s2;
+  float legacy_window_velocity_rad_s;
+  float pll_angle_error_rad;
+  float pll_measurement_dt_us;
+  float encoder_sample_age_us;
   float accel_ref_rad_s2;
   float ia_a;
   float ib_a;
@@ -41,11 +45,22 @@ typedef struct
   float position_rad;
   float position_ref_rad;
   uint32_t loop_count;
+  uint32_t speed_branch_exec_count;
   uint32_t isr_count;
   uint32_t fault_flags;
   uint32_t latched_faults;
   uint32_t encoder_error_count;
   uint32_t encoder_crc_error_count;
+  uint32_t encoder_valid_sample_count;
+  uint32_t encoder_dma_start_fail_count;
+  uint32_t encoder_dma_error_count;
+  uint32_t encoder_missed_trigger_count;
+  uint32_t encoder_fault_trigger_count;
+  uint32_t encoder_fault_age_cycles;
+  uint32_t encoder_fault_valid_count;
+  uint32_t current_isr_max_cycles;
+  uint32_t current_isr_max_us;
+  uint32_t encoder_dma_callback_max_us;
   uint32_t outer_loop_count;
   uint32_t outer_loop_miss_count;
   uint32_t outer_loop_dt_us;
@@ -55,6 +70,7 @@ typedef struct
   uint8_t encoder_status_ok;
   uint8_t voltage_saturated;
   uint8_t encoder_valid;
+  uint8_t encoder_pll_locked;
   uint8_t power_stage_armed;
   uint16_t bus_ok_ms;
   uint16_t drv_fault_ok_ms;
@@ -135,6 +151,11 @@ extern volatile float control_mit_vel_rad_s;
 extern volatile float control_mit_kp;
 extern volatile float control_mit_kd;
 extern volatile float control_mit_iq_ff_a;
+
+/* Debug command mailbox consumed by ControlApp_Update().
+ * 1 = set speed ref and enter speed mode; 2 = disable. */
+extern volatile uint8_t control_debug_cmd;
+extern volatile float control_debug_speed_ref_rad_s;
 
 #ifdef __cplusplus
 }

@@ -59,6 +59,8 @@ extern TIM_HandleTypeDef htim1;
 /* USER CODE BEGIN EV */
 extern UART_HandleTypeDef huart1;
 extern DMA_HandleTypeDef hdma_adc1;
+extern DMA_HandleTypeDef hdma_spi3_rx;
+extern DMA_HandleTypeDef hdma_spi3_tx;
 
 /* USER CODE END EV */
 
@@ -212,5 +214,21 @@ void USART1_IRQHandler(void)
 void DMA1_Channel1_IRQHandler(void)
 {
   HAL_DMA_IRQHandler(&hdma_adc1);
+}
+
+/**
+  * @brief DMA1 Channel2: MT6701 SPI3 RX complete.
+  */
+void DMA1_Channel2_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&hdma_spi3_rx);
+}
+
+/**
+  * @brief DMA1 Channel3: MT6701 SPI3 TX complete.
+  */
+void DMA1_Channel3_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&hdma_spi3_tx);
 }
 /* USER CODE END 1 */

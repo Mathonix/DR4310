@@ -11,6 +11,7 @@
 #include "MotorParams.hpp"
 #include "RotorEstimator.hpp"
 #include "FaultManager.hpp"
+#include "ElectricalAngle.hpp"
 #include "main.h"
 
 #include <algorithm>
@@ -38,9 +39,9 @@ constexpr uint32_t kFaultBusUndervolt = 0x00000008UL;
 constexpr float kBusMinEnableV = 6.0f;
 /* Require continuous good bus samples before arming FOC after boot/mode entry. */
 constexpr uint16_t kBusOkSettleMs = 50U;
-constexpr float kOpenLoopRampRadS2 = 10.0f;
-constexpr float kCurrentTestRampAS = 100.0f;
-constexpr float kSpeedRefRampRadS2 = 3.1416f; /* ~30 rpm/s */
+constexpr float kOpenLoopRampRadS2 = 1000.0f;
+constexpr float kCurrentTestRampAS = 10000.0f;
+constexpr float kSpeedRefRampRadS2 = 10000.0f;
 constexpr float kCurrentLoopOmegaC = 1200.0f;
 constexpr float kIqSoftLimitA = 2.50f;
 constexpr float kRpmToRadS = 0.10471975512f;
@@ -66,12 +67,15 @@ constexpr uint8_t kVofaJustfloatTail2 = 0x80U;
 constexpr uint8_t kVofaJustfloatTail3 = 0x7FU;
 constexpr float kDefaultElectricalZeroRad = 0.0f;
 constexpr uint8_t kDefaultEncoderDirection = 1U;
-constexpr uint32_t kEncoderFaultThreshold = 10U;
+constexpr uint32_t kEncoderValidWindowCycles = 340000U;
+constexpr uint32_t kEncoderFaultTimeoutCycles = 1700000U;
+constexpr uint32_t kEncoderMinValidSamplesForFault = 10U;
+constexpr uint32_t kEncoderTriggerDivider = 2U;
 constexpr uint16_t kDrvFaultSettleMs = 20U;
 constexpr uint16_t kDrvFaultLowDebounceMs = 5U;
 constexpr uint32_t kOuterLoopIsrTicks = 20U;
 constexpr uint32_t kCpuClockHz = 170000000U;
-constexpr size_t kVofaFrameValueCount = 6U;
+constexpr size_t kVofaFrameValueCount = 8U;
 constexpr size_t kVofaFrameBytes = (kVofaFrameValueCount * sizeof(float)) + 4U;
 constexpr size_t kVofaRingFrames = 4U;
 constexpr float kCalibAlignVoltageV = 1.20f;
@@ -148,7 +152,7 @@ volatile float control_position_target_rad = 0.0f;
 volatile float control_position_kp = 3.5f;
 volatile float control_position_ki = 1.2f;
 volatile float control_position_kd = 2.6f;
-volatile float control_position_velocity_limit_rad_s = 5.76f; /* ~55 rpm */
+volatile float control_position_velocity_limit_rad_s = 100.0f;
 volatile float control_position_i_sep_rad = 0.35f;
 volatile float control_open_loop_voltage_v = app::kOpenLoopModMax;
 
@@ -160,9 +164,9 @@ volatile float control_current_pi_kp = 12.0f;
 volatile float control_current_pi_ki = 1500.0f;
 volatile float control_current_pi_out_limit_v = 0.0f;
 volatile float control_current_pi_kaw = 0.5f;
-volatile float control_iq_limit_a = 0.50f;
+volatile float control_iq_limit_a = 1.00f;
 /* 速度环默认 Kp/Ki；上电会使用这里，也可通过 RAM 实时修改。 */
-volatile float control_speed_pi_kp = 0.10f;
+volatile float control_speed_pi_kp = 0.25f;
 volatile float control_speed_pi_ki = 0.02f;
 volatile float control_speed_pi_kd = 0.0f;
 volatile float control_accel_ref_rad_s2 = 0.0f;
@@ -177,6 +181,8 @@ volatile float control_mit_vel_rad_s = 0.0f;
 volatile float control_mit_kp = 10.0f;
 volatile float control_mit_kd = 0.5f;
 volatile float control_mit_iq_ff_a = 0.0f;
+volatile uint8_t control_debug_cmd = 0U;
+volatile float control_debug_speed_ref_rad_s = 0.0f;
 
 namespace app {
 
@@ -199,6 +205,7 @@ class ApplicationController {
 
  private:
   static void OnCurrentSample(void *context);
+  void UpdateRotorInFocIsr(uint32_t now_cycles);
   static float Wrap0To2Pi(float angle);
   static float WrapPmPi(float angle);
   static float Clamp(float value, float low, float high);
@@ -247,9 +254,9 @@ class ApplicationController {
   float applied_position_kp_ = 3.5f;
   float applied_position_ki_ = 1.2f;
   float applied_position_kd_ = 2.6f;
-  float applied_position_vel_limit_ = 5.76f;
+  float applied_position_vel_limit_ = 100.0f;
   float applied_position_isep_ = 0.35f;
-  float applied_trajectory_accel_ = 5.0f;
+  float applied_trajectory_accel_ = 1000.0f;
   float applied_max_modulation_ = 0.90f;
   uint8_t applied_decoupling_enable_ = 0U;
   float speed_ref_applied_rad_s_ = 0.0f;
@@ -285,6 +292,8 @@ class ApplicationController {
   uint32_t outer_loop_miss_count_ = 0U;
   uint32_t outer_loop_dt_us_ = 0U;
   uint32_t outer_loop_dt_max_us_ = 0U;
+  uint32_t encoder_trigger_divider_ = 0U;
+  uint32_t current_isr_max_cycles_ = 0U;
   CalibState calib_state_ = CalibState::kIdle;
   uint16_t calib_timer_ms_ = 0U;
   uint16_t calib_sample_count_ = 0U;
@@ -344,10 +353,11 @@ void ApplicationController::ClearLegacyModeFlags() {
 
 float ApplicationController::ComputeElectricalAngle(float encoder_angle_rad) const {
   const float mech_cal =
-      control_encoder_direction != 0U
-          ? Wrap0To2Pi(control_electrical_zero_rad + encoder_angle_rad)
-          : Wrap0To2Pi(control_electrical_zero_rad - encoder_angle_rad);
-  return Wrap0To2Pi(mech_cal * kMotorPolePairs);
+      control::MechanicalAngleFromEncoder(
+          encoder_angle_rad,
+          control_encoder_direction == 0U,
+          control_electrical_zero_rad);
+  return control::Wrap0To2Pi(mech_cal * kMotorPolePairs);
 }
 
 void ApplicationController::CalibReset() {
@@ -536,7 +546,9 @@ uint8_t ApplicationController::UpdatePowerStageArm(float bus_v) {
   const bool bus_ok = (bus_v >= kBusMinEnableV) && (bus_v <= 40.0f);
   const bool drv_ok =
       HAL_GPIO_ReadPin(DRV_nFAULT_GPIO_Port, DRV_nFAULT_Pin) != GPIO_PIN_RESET;
-  const bool encoder_ok = encoder_valid_ != 0U;
+  const bool encoder_ok =
+      (encoder_valid_ != 0U) &&
+      (rotor_estimator_.state().pll_sample_count != 0U);
   const bool sense_ok =
       health.calibrated && health.zero_a_valid && health.zero_b_valid &&
       health.dma_running && health.latest_sample_valid;
@@ -703,9 +715,48 @@ void ApplicationController::OnModeEnter(uint8_t new_mode, uint8_t prev_mode) {
 
 void ApplicationController::OnCurrentSample(void *context) {
   auto *self = static_cast<ApplicationController *>(context);
-  if (self != nullptr) {
-    self->foc_.OnPwmUpdate();
+  if (self == nullptr) {
+    return;
   }
+
+  const uint32_t isr_start_cycles = DWT->CYCCNT;
+  self->UpdateRotorInFocIsr(isr_start_cycles);
+  self->foc_.OnPwmUpdate();
+
+  if (++self->encoder_trigger_divider_ >= kEncoderTriggerDivider) {
+    self->encoder_trigger_divider_ = 0U;
+    (void)self->encoder_hw_.startReadDma();
+  }
+
+  const uint32_t isr_end_cycles = DWT->CYCCNT;
+  const uint32_t isr_cycles = isr_end_cycles - isr_start_cycles;
+  if (isr_cycles > self->current_isr_max_cycles_) {
+    self->current_isr_max_cycles_ = isr_cycles;
+  }
+}
+
+void ApplicationController::UpdateRotorInFocIsr(uint32_t now_cycles) {
+  rotor_estimator_.predict(control::kFocDtS);
+
+  hardware::EncoderSample sample = {};
+  if (encoder_hw_.consumeLatestSample(sample)) {
+    const float canonical_angle =
+        control::MechanicalAngleFromEncoder(
+            sample.angle_rad,
+            control_encoder_direction == 0U,
+            0.0f);
+    rotor_estimator_.correct(canonical_angle,
+                             sample.timestamp_cycles,
+                             now_cycles);
+  }
+
+  const float theta_mech = rotor_estimator_.state().theta_mech_est_rad;
+  const float theta_e =
+      control::ElectricalAngleFromCanonicalMechanical(
+          theta_mech,
+          control_electrical_zero_rad,
+          kMotorPolePairs);
+  foc_.SetDirectElectricalAngle(theta_e);
 }
 
 void ApplicationController::Init(ADC_HandleTypeDef *hadc,
@@ -721,7 +772,9 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
   DWT->CYCCNT = 0U;
   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-  rotor_estimator_.reset(0.0f);
+  rotor_estimator_.reset(0.0f, 0U);
+  rotor_estimator_.setPllParams(control::RotorEstimator::kPllBandwidthHz,
+                                control::RotorEstimator::kPllDamping);
   speed_controller_.init(control_speed_pi_kp,
                          control_speed_pi_ki,
                          control_iq_limit_a);
@@ -735,9 +788,9 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
   trajectory_.init(control_position_velocity_limit_rad_s,
                    (control_accel_ref_rad_s2 > 0.1f)
                        ? control_accel_ref_rad_s2
-                       : 5.0f);
+                       : 1000.0f);
   applied_trajectory_accel_ =
-      (control_accel_ref_rad_s2 > 0.1f) ? control_accel_ref_rad_s2 : 5.0f;
+      (control_accel_ref_rad_s2 > 0.1f) ? control_accel_ref_rad_s2 : 1000.0f;
   applied_position_kp_ = control_position_kp;
   applied_position_ki_ = control_position_ki;
   applied_position_kd_ = control_position_kd;
@@ -875,12 +928,14 @@ void ApplicationController::SendVofaDebug() {
 
   const auto &foc = foc_.GetState();
   std::array<float, kVofaFrameValueCount> frame_values = {};
-  frame_values[0] = control_current_test_iq_ref_a;
-  frame_values[1] = telemetry_.iq_ref_a;
-  frame_values[2] = foc.iq_a;
-  frame_values[3] = foc.id_a;
-  frame_values[4] = foc.vq_v;
-  frame_values[5] = telemetry_.velocity_rad_s * kRadSToRpm;
+  frame_values[0] = control_velocity_ref_rad_s;
+  frame_values[1] = active_velocity_ref_rad_s_;
+  frame_values[2] = rotor_estimator_.state().raw_velocity_rad_s;
+  frame_values[3] = rotor_estimator_.state().velocity_rad_s;
+  frame_values[4] = telemetry_.iq_ref_a;
+  frame_values[5] = foc.iq_a;
+  frame_values[6] = rotor_estimator_.state().pll_angle_error_rad;
+  frame_values[7] = rotor_estimator_.state().encoder_sample_age_us;
 
   std::array<uint8_t, (sizeof(float) * kVofaFrameValueCount) + 4U> frame = {};
   std::memcpy(frame.data(),
@@ -962,16 +1017,42 @@ void ApplicationController::Update() {
 
   fault_manager_.clearActiveFaults();
 
-  if (encoder_hw_.read(encoder_) != HAL_OK) {
+  const auto &encoder_health = encoder_hw_.health();
+  const uint32_t last_valid_timestamp_cycles =
+      encoder_health.last_valid_timestamp_cycles;
+  const uint32_t encoder_now_cycles = DWT->CYCCNT;
+  uint32_t encoder_age_cycles =
+      encoder_now_cycles - last_valid_timestamp_cycles;
+  if ((encoder_age_cycles & 0x80000000U) != 0U) {
+    /* Timestamp read race / wrap artifact: do not turn it into a 10ms fault. */
+    encoder_age_cycles = 0U;
+  }
+  const bool has_encoder_sample = encoder_health.valid_sample_count != 0U;
+  if (has_encoder_sample &&
+      (encoder_age_cycles <= kEncoderValidWindowCycles)) {
+    encoder_valid_ = 1U;
+  } else {
     encoder_valid_ = 0U;
-    if (encoder_hw_.health().consecutive_error_count >= kEncoderFaultThreshold) {
+    if (has_encoder_sample &&
+        (encoder_health.valid_sample_count >=
+         kEncoderMinValidSamplesForFault) &&
+        (encoder_age_cycles > kEncoderFaultTimeoutCycles)) {
+      telemetry_.encoder_fault_trigger_count++;
+      telemetry_.encoder_fault_age_cycles = encoder_age_cycles;
+      telemetry_.encoder_fault_valid_count =
+          encoder_health.valid_sample_count;
       fault_manager_.setFault(safety::Fault::EncoderComm);
     }
-  } else {
-    encoder_valid_ = 1U;
-    const auto &rotor = rotor_estimator_.update(encoder_.angle_rad, kControlDtS);
-    position_unwrapped_rad_ = rotor.position_rad;
   }
+  (void)encoder_hw_.timeoutStuckTransfer(encoder_now_cycles);
+  if (encoder_valid_ != 0U) {
+    encoder_.angle_rad = encoder_health.last_valid_angle_rad;
+    encoder_.angle_deg = encoder_health.last_valid_angle_deg;
+    encoder_.status = encoder_health.last_valid_status;
+    encoder_.crc_ok = encoder_health.last_valid_crc_ok != 0U;
+    encoder_.status_ok = encoder_health.last_valid_status_ok != 0U;
+  }
+  position_unwrapped_rad_ = rotor_estimator_.state().position_rad;
 
   {
     current_ = foc_.GetLastCurrent();
@@ -1048,6 +1129,7 @@ void ApplicationController::Update() {
   float iq_ref = 0.0f;
   const float mech_vel = rotor_estimator_.state().velocity_rad_s;
   if (control_mode == kModeSpeed) {
+    telemetry_.speed_branch_exec_count++;
     speed_ref_applied_rad_s_ =
         SlewRateLimit(speed_ref_applied_rad_s_,
                       control_velocity_ref_rad_s,
@@ -1088,11 +1170,7 @@ void ApplicationController::Update() {
   }
 
   float omega_e = rotor_estimator_.state().velocity_rad_s * kMotorPolePairs;
-  if (control_encoder_direction == 0U) {
-    omega_e = -omega_e;
-  }
   foc_.SetOmegaE(omega_e);
-  foc_.SetElectricalAngle(electrical_angle);
 
   if ((control_current_pi_kp != applied_current_pi_kp_) ||
       (control_current_pi_ki != applied_current_pi_ki_) ||
@@ -1147,7 +1225,7 @@ void ApplicationController::Update() {
   }
 
   const float trajectory_accel =
-      (control_accel_ref_rad_s2 > 0.1f) ? control_accel_ref_rad_s2 : 5.0f;
+      (control_accel_ref_rad_s2 > 0.1f) ? control_accel_ref_rad_s2 : 1000.0f;
   if (trajectory_accel != applied_trajectory_accel_) {
     applied_trajectory_accel_ = trajectory_accel;
     trajectory_.setLimits(control_position_velocity_limit_rad_s,
@@ -1292,6 +1370,14 @@ void ApplicationController::Update() {
   telemetry_.angle_deg = encoder_.angle_deg;
   telemetry_.velocity_rad_s = rotor_estimator_.state().velocity_rad_s;
   telemetry_.accel_rad_s2 = rotor_estimator_.state().acceleration_rad_s2;
+  telemetry_.legacy_window_velocity_rad_s =
+      rotor_estimator_.state().legacy_window_velocity_rad_s;
+  telemetry_.pll_angle_error_rad =
+      rotor_estimator_.state().pll_angle_error_rad;
+  telemetry_.pll_measurement_dt_us =
+      rotor_estimator_.state().pll_measurement_dt_us;
+  telemetry_.encoder_sample_age_us =
+      rotor_estimator_.state().encoder_sample_age_us;
   telemetry_.accel_ref_rad_s2 = active_accel_ref_rad_s2_;
   telemetry_.ia_a = current_.ia_a;
   telemetry_.ib_a = current_.ib_a;
@@ -1320,11 +1406,26 @@ void ApplicationController::Update() {
   telemetry_.encoder_error_count =
       encoder_hw_.health().consecutive_error_count;
   telemetry_.encoder_crc_error_count = encoder_hw_.health().crc_error_count;
+  telemetry_.encoder_valid_sample_count =
+      encoder_hw_.health().valid_sample_count;
+  telemetry_.encoder_dma_start_fail_count =
+      encoder_hw_.health().dma_start_fail_count;
+  telemetry_.encoder_dma_error_count =
+      encoder_hw_.health().dma_error_count;
+  telemetry_.encoder_missed_trigger_count =
+      encoder_hw_.health().missed_trigger_count;
+  telemetry_.current_isr_max_cycles = current_isr_max_cycles_;
+  telemetry_.current_isr_max_us =
+      current_isr_max_cycles_ / (kCpuClockHz / 1000000U);
+  telemetry_.encoder_dma_callback_max_us =
+      encoder_hw_.health().dma_callback_max_us;
   telemetry_.encoder_status = encoder_.status;
   telemetry_.encoder_crc_ok = encoder_.crc_ok ? 1U : 0U;
   telemetry_.encoder_status_ok = encoder_.status_ok ? 1U : 0U;
   telemetry_.voltage_saturated = foc.voltage_saturated;
   telemetry_.encoder_valid = encoder_valid_;
+  telemetry_.encoder_pll_locked =
+      rotor_estimator_.state().pll_locked != 0U ? 1U : 0U;
   telemetry_.power_stage_armed = power_stage_armed_;
   telemetry_.bus_ok_ms = bus_ok_ms_;
   telemetry_.drv_fault_ok_ms = drv_fault_ok_ms_;
@@ -1374,6 +1475,17 @@ extern "C" void ControlApp_Init(ADC_HandleTypeDef *hadc,
 }
 
 extern "C" void ControlApp_Update(void) {
+  if (control_debug_cmd == 1U) {
+    app::g_application.SetSpeedRef(control_debug_speed_ref_rad_s);
+    app::g_application.SetMode(app::kModeSpeed);
+    control_debug_cmd = 0U;
+  } else if (control_debug_cmd == 2U) {
+    app::g_application.Disable();
+    control_debug_cmd = 0U;
+  } else if (control_debug_cmd == 3U) {
+    app::g_application.ClearFaults();
+    control_debug_cmd = 0U;
+  }
   app::g_application.Update();
 }
 
