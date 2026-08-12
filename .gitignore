@@ -21,3 +21,7 @@ __pycache__/
 # Local task and report notes
 /task/
 /report/
+
+# Host-side debug/test scripts
+/tests/
+/tools/
