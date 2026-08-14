@@ -16,6 +16,9 @@ __pycache__/
 *.user
 *.jlink
 
+# J-Link commander scripts
+/jlink/
+
 !.settings/
 
 # Local task and report notes
