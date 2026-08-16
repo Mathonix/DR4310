@@ -1,36 +1,41 @@
-build/
-mx.scratch
-.pytest_cache/
-__pycache__/
+# ═══════════════════════════════════════════════════════════════
+# 白名单模式 (Whitelist mode)
+# 默认忽略所有文件/目录，只放行下列与开源发布相关的条目。
+# Ignore everything by default; only items listed below are
+# published to the GitHub repository.
+# ═══════════════════════════════════════════════════════════════
+/*
 
+# ── 基础 (Basics) ──
+!.gitignore
+!README.md
+!.clangd
+!.mxproject
+
+# ── 构建系统 (Build system) ──
+!CMakeLists.txt
+!CMakePresets.json
+!cmake/
+
+# ── STM32CubeMX 工程 ──
+!/*.ioc
+
+# ── 源码 (Source code) ──
+!Core/
+!Libraries/
+!Drivers/
+
+# ── 启动/链接文件 (Startup & linker) ──
+!startup_stm32g431xx.s
+!STM32G431XX_FLASH.ld
+
+# ── 文档 (Docs) ──
+!docs/
+
+# ── 构建产物 (Build artifacts — stay out even inside whitelisted dirs) ──
+*.a
+*.o
 *.elf
 *.hex
 *.bin
 *.map
-*.o
-*.a
-
-*.log
-*.out.txt
-*.txt
-*.user
-*.jlink
-
-# IAR debugger / script artifacts
-*.jdebug
-*.jdebug.user
-*.python
-*.cmd
-
-# J-Link commander scripts
-/jlink/
-
-!.settings/
-
-# Local task and report notes
-/task/
-/report/
-
-# Host-side debug/test scripts
-/tests/
-/tools/
