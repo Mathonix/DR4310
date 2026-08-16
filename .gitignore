@@ -16,6 +16,12 @@ __pycache__/
 *.user
 *.jlink
 
+# IAR debugger / script artifacts
+*.jdebug
+*.jdebug.user
+*.python
+*.cmd
+
 # J-Link commander scripts
 /jlink/
 
