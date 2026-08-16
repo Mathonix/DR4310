@@ -33,7 +33,7 @@ arm-none-eabi-objcopy -O ihex build/Release/4310_G431KBT6.elf build/Release/4310
 JLink.exe -device STM32G431KB -if SWD -speed 1000 -autoconnect 1 -CommanderScript flash_release.jlink -ExitOnError 1
 ```
 
-> 20 kHz FOC 请使用 Release 构建。Debug `-O0` 的 FOC ISR 过重，会饿死主循环。
+> 20 kHz FOC 请使用 Release 构建。Debug `-O0` 的 FOC ISR 过重，主循环会卡死。
 
 ## 控制结构
 
@@ -142,4 +142,3 @@ WS2812 故障灯颜色和闪烁次数：
 
 - 编码器 CRC 校验已关闭，样本有效性只看 MT6701 status。
 - 长时间 100 rpm 测试如果触发 DRV 故障，请确认可调电源电流余量和电机机械负载。
-- `.jlink`、`.log`、`.txt`、`build/`、Ozone `.user` 默认不入库。
