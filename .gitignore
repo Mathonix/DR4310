@@ -31,6 +31,8 @@
 
 # ── 文档 (Docs) ──
 !docs/
+# 第三方数据手册文本不发布
+docs/mt6701_datasheet.txt
 
 # ── 构建产物 (Build artifacts — stay out even inside whitelisted dirs) ──
 *.a
