@@ -70,7 +70,7 @@ class MT6701 {
   bool consumeLatestSample(EncoderSample &sample);
   void onDmaComplete();
   void onDmaError();
-  bool timeoutStuckTransfer(uint32_t now_cycles);
+  bool timeoutStuckTransfer();
   static void NotifyDmaComplete(SPI_HandleTypeDef *hspi);
   static void NotifyDmaError(SPI_HandleTypeDef *hspi);
   const EncoderHealth &health() const;

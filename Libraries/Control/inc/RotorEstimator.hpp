@@ -33,6 +33,10 @@ class RotorEstimator {
   static constexpr float kPllBandwidthHz = 20.0f;
   static constexpr float kPllDamping = 0.8f;
   static constexpr float kMaxInnovationRad = 0.25f;
+  static constexpr float kMaxAbsVelocityRadS = 200.0f;
+  /* Require 50 ms of continuous rejection at the 10 kHz encoder rate before
+   * re-locking. A shorter window can lock onto a burst of EMI-corrupted data. */
+  static constexpr uint32_t kMaxRejectedInnovations = 500U;
 
   void reset(float angle_rad);
   void reset(float angle_rad, uint32_t timestamp_cycles);
@@ -67,6 +71,7 @@ class RotorEstimator {
   uint32_t pll_sample_count_ = 0U;
   bool pll_initialized_ = false;
   bool pll_first_sample_pending_ = true;
+  uint32_t consecutive_rejected_innovations_ = 0U;
 };
 
 }  // namespace control

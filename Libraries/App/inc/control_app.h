@@ -85,6 +85,10 @@ typedef struct
   uint8_t calib_state;
   uint8_t encoder_direction;
   float electrical_zero_rad;
+  uint8_t calibration_flash_status; /* 0=default, 1=loaded, 2=saved, 3=save failed */
+  uint8_t calibration_flash_valid;
+  uint32_t calibration_flash_sequence;
+  uint32_t calibration_flash_save_count;
 } ControlTelemetry_t;
 
 #ifdef __cplusplus
@@ -117,6 +121,10 @@ extern volatile uint8_t control_align_enable;
 extern volatile uint8_t control_position_enable;
 extern volatile uint8_t control_ident_enable;
 extern volatile uint8_t control_calibrate_enable;
+extern volatile uint8_t calibration_flash_status;
+extern volatile uint8_t calibration_flash_valid;
+extern volatile uint32_t calibration_flash_sequence;
+extern volatile uint32_t calibration_flash_save_count;
 
 extern volatile float control_velocity_ref_rad_s;
 extern volatile float control_position_target_rad;

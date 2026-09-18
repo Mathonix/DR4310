@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "control_app.h"
+#include "gm6020_can.h"
 #include <string.h>
 
 /* USER CODE END Includes */
@@ -46,6 +47,7 @@ typedef struct
 #define WS2812_SPI_BITS_PER_BIT 3U
 #define WS2812_FRAME_BYTES      ((WS2812_LED_COUNT * WS2812_BITS_PER_LED * WS2812_SPI_BITS_PER_BIT) / 8U)
 #define WS2812_RESET_BYTES      80U
+#define WS2812_TX_BYTES         ((WS2812_FRAME_BYTES + WS2812_RESET_BYTES) * LED_TX_REPEAT_COUNT)
 #define WS2812_CODE_0           0x4U
 #define WS2812_CODE_1           0x6U
 #define INA240_CHANNEL_COUNT    3U
@@ -119,6 +121,8 @@ typedef struct
 #define LED_BLINK_STEP_MS       500U
 #define LED_GROUP_PAUSE_MS      1000U
 #define LED_ON_TIME_MS          120U
+#define LED_REFRESH_MS          250U
+#define LED_TX_REPEAT_COUNT     2U
 #define LED_MAX_BLINK_ID        10U
 #define BOARD_TEST_MODE         0U
 #define BOARD_TEST_REPORT_MS    100U
@@ -145,6 +149,7 @@ FDCAN_HandleTypeDef hfdcan1;
 
 SPI_HandleTypeDef hspi1;
 SPI_HandleTypeDef hspi3;
+DMA_HandleTypeDef hdma_spi1_tx;
 
 TIM_HandleTypeDef htim1;
 
@@ -152,7 +157,7 @@ UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
 static uint8_t ws2812_frame[WS2812_FRAME_BYTES];
-static uint8_t ws2812_reset[WS2812_RESET_BYTES];
+static uint8_t ws2812_tx_buffer[WS2812_TX_BYTES];
 volatile LedFaultReport_t g_fault_report[LED_FAULT_COUNT];
 volatile uint32_t g_fault_report_generation = 0U;
 volatile uint32_t g_fault_report_last_flags = 0U;
@@ -188,7 +193,14 @@ volatile uint32_t can_test_protocol_error_warning;
 volatile uint32_t can_test_protocol_error_passive;
 volatile uint32_t can_test_tx_error_count;
 volatile uint32_t can_test_rx_error_count;
-volatile uint8_t can_node_id = 2U;
+const volatile uint8_t can_node_id = MOTOR_CAN_ID;
+static GM6020_Session gm6020_session;
+static uint32_t gm6020_feedback_tick;
+volatile uint32_t gm6020_rx_count;
+volatile uint32_t gm6020_tx_count;
+volatile uint32_t gm6020_timeout_or_interlock_count;
+volatile uint32_t gm6020_tx_drop_count;
+volatile uint32_t can_invalid_frame_count;
 volatile uint8_t can_control_mode;
 volatile uint8_t can_control_last_cmd;
 volatile uint32_t can_control_rx_count;
@@ -232,6 +244,7 @@ static void CAN_ExternalDebugInit(void);
 static void CAN_ExternalDebugUpdate(void);
 static void CAN_ApplyControlFrame(uint32_t id, const uint8_t *data);
 static void CAN_SendStatusFrame(uint8_t mode, uint8_t fault_flags);
+static void CAN_SendGM6020Feedback(void);
 static float CAN_UintToFloat(uint16_t x_int, float x_min, float x_max, uint8_t bits);
 static void CAN_UnpackMit(const uint8_t *data, float *pos, float *vel, float *kp, float *kd, float *iq_ff);
 static void LED_BootRainbow(void);
@@ -976,9 +989,9 @@ static void CAN_RecoverIfNeeded(void)
   static uint32_t last_recover_tick;
   uint32_t now = HAL_GetTick();
 
-  if ((can_test_protocol_bus_off == 0UL) &&
-      (can_test_protocol_error_passive == 0UL) &&
-      (can_test_tx_error_count < 96UL))
+  /* Error-passive still permits TX: successful ACKs are required to lower TEC.
+   * Stopping TX at TEC>=96 deadlocks a board started before its CAN peer. */
+  if (can_test_protocol_bus_off == 0UL)
   {
     return;
   }
@@ -1001,10 +1014,10 @@ static void CAN_ExternalDebugInit(void)
 
   filter.IdType = FDCAN_STANDARD_ID;
   filter.FilterIndex = 0;
-  filter.FilterType = FDCAN_FILTER_MASK;
+  filter.FilterType = FDCAN_FILTER_DUAL;
   filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
   filter.FilterID1 = CAN_CONTROL_BASE_ID + ((can_node_id == 0U) ? CAN_TEST_ID : (uint32_t)(can_node_id & 0x7FU));
-  filter.FilterID2 = 0x7FFU;
+  filter.FilterID2 = GM6020_COMMAND_ID;
 
   can_test_status = HAL_FDCAN_ConfigFilter(&hfdcan1, &filter);
   if (can_test_status != HAL_OK)
@@ -1042,8 +1055,17 @@ static void CAN_ExternalDebugUpdate(void)
   uint32_t now = HAL_GetTick();
   const ControlTelemetry_t *control = ControlApp_GetTelemetry();
   uint8_t mode = CAN_MODE_DISABLED;
+  uint8_t rx_budget = 3U;
 
-  while (HAL_FDCAN_GetRxFifoFillLevel(&hfdcan1, FDCAN_RX_FIFO0) > 0U)
+  if (GM6020_CheckSession(&gm6020_session, now,
+      (ControlApp_GetMode() == CTRL_MODE_CURRENT) && control->arm_all_ok))
+  {
+    ControlApp_Disable();
+    can_control_mode = CAN_MODE_DISABLED;
+    gm6020_timeout_or_interlock_count++;
+  }
+
+  while ((rx_budget-- > 0U) && HAL_FDCAN_GetRxFifoFillLevel(&hfdcan1, FDCAN_RX_FIFO0) > 0U)
   {
     can_test_status = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &rx_header, rx_data);
     if (can_test_status != HAL_OK)
@@ -1056,7 +1078,43 @@ static void CAN_ExternalDebugUpdate(void)
     can_test_rx_dlc = rx_header.DataLength;
     memcpy((void *)can_test_rx_data, rx_data, sizeof(can_test_rx_data));
     can_test_rx_count++;
-    CAN_ApplyControlFrame(rx_header.Identifier, rx_data);
+    if (rx_header.IdType != FDCAN_STANDARD_ID ||
+        rx_header.RxFrameType != FDCAN_DATA_FRAME ||
+        rx_header.FDFormat != FDCAN_CLASSIC_CAN || rx_header.DataLength != FDCAN_DLC_BYTES_8)
+    {
+      can_invalid_frame_count++;
+      continue;
+    }
+    float amps = 0.0f;
+    if (GM6020_DecodeCurrent(MOTOR_CAN_ID, rx_header.Identifier, rx_data, 8U, 1U, &amps))
+    {
+      gm6020_rx_count++;
+      int action = GM6020_Accept(&gm6020_session, HAL_GetTick(), amps,
+          control->arm_all_ok && !control->fault_flags && !ControlApp_GetLatchedFaults(),
+          ControlApp_GetMode() == CTRL_MODE_IDLE);
+      if (action < 0)
+      {
+        ControlApp_Disable(); can_control_mode = CAN_MODE_DISABLED; can_control_target = 0.0f;
+      }
+      else if (action > 0)
+      {
+        ControlApp_SetCurrentRef(amps);
+        ControlApp_SetMode(CTRL_MODE_CURRENT);
+        can_control_mode = CAN_MODE_CURRENT; can_control_target = amps;
+      }
+    }
+    else
+    {
+      if (gm6020_session.active) ControlApp_Disable();
+      GM6020_Cancel(&gm6020_session);
+      CAN_ApplyControlFrame(rx_header.Identifier, rx_data);
+    }
+  }
+
+  if ((uint32_t)(now - gm6020_feedback_tick) >= 1U)
+  {
+    gm6020_feedback_tick = now;
+    CAN_SendGM6020Feedback();
   }
 
   if ((now - can_test_last_tick) < CAN_TEST_TX_PERIOD_MS)
@@ -1069,9 +1127,7 @@ static void CAN_ExternalDebugUpdate(void)
 
   /* Skip TX while bus is unhealthy; recovery path will restart the controller. */
   CAN_UpdateDiagnostics();
-  if ((can_test_protocol_bus_off != 0UL) ||
-      (can_test_protocol_error_passive != 0UL) ||
-      (can_test_tx_error_count >= 96UL))
+  if (can_test_protocol_bus_off != 0UL)
   {
     CAN_RecoverIfNeeded();
     return;
@@ -1104,6 +1160,27 @@ static void CAN_ExternalDebugUpdate(void)
 
   CAN_SendStatusFrame(mode, (uint8_t)(control->fault_flags & 0xFFU));
   CAN_UpdateDiagnostics();
+}
+
+static void CAN_SendGM6020Feedback(void)
+{
+  if (can_test_protocol_bus_off || HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0U)
+  { gm6020_tx_drop_count++; return; }
+  const ControlTelemetry_t *control = ControlApp_GetTelemetry();
+  FDCAN_TxHeaderTypeDef header = {0};
+  uint8_t data[8];
+  GM6020_PackFeedback(control->angle_deg, control->velocity_rad_s * RAD_S_TO_RPM,
+      control->power_stage_armed ? control->iq_a : 0.0f, data);
+  header.Identifier = GM6020_FEEDBACK_ID;
+  header.IdType = FDCAN_STANDARD_ID;
+  header.TxFrameType = FDCAN_DATA_FRAME;
+  header.DataLength = FDCAN_DLC_BYTES_8;
+  header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+  header.BitRateSwitch = FDCAN_BRS_OFF;
+  header.FDFormat = FDCAN_CLASSIC_CAN;
+  header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+  if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &header, data) == HAL_OK) gm6020_tx_count++;
+  else gm6020_tx_drop_count++;
 }
 
 static void CAN_SendStatusFrame(uint8_t mode, uint8_t fault_flags)
@@ -1594,87 +1671,84 @@ static void LED_StatusUpdate(void)
   static uint8_t last_red = 255U;
   static uint8_t last_green = 255U;
   static uint8_t last_blue = 255U;
+  static uint32_t last_refresh_tick = 0U;
+  static const uint8_t fault_colors[LED_FAULT_COUNT][3] = {
+    {48U, 0U, 0U},    /* CURRENT_SENSE: red */
+    {48U, 24U, 0U},   /* OVERCURRENT: orange */
+    {48U, 40U, 0U},   /* ENCODER_COMM: yellow */
+    {40U, 48U, 0U},   /* ENCODER_CRC: yellow-green */
+    {0U, 48U, 24U},   /* ENCODER_MAGNET: green-cyan */
+    {48U, 0U, 40U},   /* DRIVER: magenta */
+    {0U, 24U, 48U},   /* BUS_UNDERVOLT: blue */
+    {0U, 48U, 48U},   /* BUS_OVERVOLT: cyan */
+    {40U, 40U, 40U},  /* FOC_ISR_OVERRUN: white */
+    {24U, 48U, 24U},  /* OUTER_DEADLINE: bright green */
+  };
   const ControlTelemetry_t *control = ControlApp_GetTelemetry();
-  uint8_t fault_idx = 0xFFU;
+  const uint8_t fault_idx = LED_GetFaultIndex(control);
   uint8_t red = 0U;
   uint8_t green = 0U;
   uint8_t blue = 0U;
-  uint8_t node_id;
-  uint32_t group_ms;
-  uint32_t cycle_ms;
+  uint8_t node_id = can_node_id;
+  const uint8_t motor_enabled = (control_enable != 0U) ? 1U : 0U;
 
   LED_UpdateFaultReport(control);
-  fault_idx = LED_GetFaultIndex(control);
 
-  if (fault_idx < LED_FAULT_COUNT)
+  if (node_id == 0U)
   {
-    static const uint8_t fault_colors[LED_FAULT_COUNT][3] = {
-      {48U, 0U, 0U},    /* CURRENT_SENSE: red */
-      {48U, 24U, 0U},   /* OVERCURRENT: orange */
-      {48U, 40U, 0U},   /* ENCODER_COMM: yellow */
-      {40U, 48U, 0U},   /* ENCODER_CRC: yellow-green */
-      {0U, 48U, 24U},   /* ENCODER_MAGNET: green-cyan */
-      {48U, 0U, 40U},   /* DRIVER: magenta */
-      {0U, 24U, 48U},   /* BUS_UNDERVOLT: blue */
-      {0U, 48U, 48U},   /* BUS_OVERVOLT: cyan */
-      {40U, 40U, 40U},  /* FOC_ISR_OVERRUN: white */
-      {24U, 48U, 24U},  /* OUTER_DEADLINE: bright green */
-    };
-    const uint32_t blink_unit_ms = 200U;
-    const uint32_t blink_count = (uint32_t)fault_idx + 1U;
-    const uint32_t active_ms = blink_unit_ms * blink_count;
-    cycle_ms = HAL_GetTick() % (active_ms + 500U);
-    if (cycle_ms < active_ms)
-    {
-      if ((cycle_ms % blink_unit_ms) < 120U)
-      {
-        red = fault_colors[fault_idx][0];
-        green = fault_colors[fault_idx][1];
-        blue = fault_colors[fault_idx][2];
-      }
-    }
+    node_id = 1U;
   }
-  else if ((control_mode_cmd == CTRL_MODE_CURRENT) ||
-           (control_mode_cmd == CTRL_MODE_SPEED) ||
-           (control_mode_cmd == CTRL_MODE_POSITION) ||
-           (control_mode_cmd == CTRL_MODE_MIT) ||
-           (control_enable != 0U) ||
-           (control_open_loop_enable != 0U) ||
-           (control_current_test_enable != 0U) ||
-           (control_position_enable != 0U))
+  if (node_id > LED_MAX_BLINK_ID)
   {
-    node_id = can_node_id;
-    if (node_id == 0U)
-    {
-      node_id = 1U;
-    }
-    if (node_id > LED_MAX_BLINK_ID)
-    {
-      node_id = LED_MAX_BLINK_ID;
-    }
+    node_id = LED_MAX_BLINK_ID;
+  }
 
-    group_ms = ((uint32_t)node_id * LED_BLINK_STEP_MS) + LED_GROUP_PAUSE_MS;
-    cycle_ms = HAL_GetTick() % group_ms;
-    if (cycle_ms < ((uint32_t)node_id * LED_BLINK_STEP_MS))
+  /* Always identify the CAN node after power-up, independent of motor mode.
+   * A fault changes pulse color but never changes the CAN-ID pulse count. */
+  const uint32_t group_ms = ((uint32_t)node_id * LED_BLINK_STEP_MS) +
+                            LED_GROUP_PAUSE_MS;
+  const uint32_t cycle_ms = HAL_GetTick() % group_ms;
+  if ((cycle_ms < ((uint32_t)node_id * LED_BLINK_STEP_MS)) &&
+      ((cycle_ms % LED_BLINK_STEP_MS) < LED_ON_TIME_MS))
+  {
+    if (fault_idx < LED_FAULT_COUNT)
     {
-      if ((cycle_ms % LED_BLINK_STEP_MS) < LED_ON_TIME_MS)
-      {
-        green = 48U;
-      }
+      red = fault_colors[fault_idx][0];
+      green = fault_colors[fault_idx][1];
+      blue = fault_colors[fault_idx][2];
+    }
+    else if (motor_enabled != 0U)
+    {
+      green = 48U;             /* Enabled: green CAN-ID pulses. */
+    }
+    else
+    {
+      green = 48U;
+      blue = 48U;              /* Disabled: cyan CAN-ID pulses. */
     }
   }
 
-  if ((red == last_red) && (green == last_green) && (blue == last_blue))
+  const uint32_t now = HAL_GetTick();
+  const uint8_t color_changed =
+      ((red != last_red) || (green != last_green) || (blue != last_blue)) ? 1U : 0U;
+  const uint8_t refresh_due =
+      ((uint32_t)(now - last_refresh_tick) >= LED_REFRESH_MS) ? 1U : 0U;
+  if ((color_changed == 0U) && (refresh_due == 0U))
   {
     return;
   }
 
+  /* WS2812 data can be corrupted by motor-switching noise. SPI1 TX DMA keeps
+   * the encoded waveform continuous while FOC interrupts remain enabled. The
+   * complete frame is sent twice so the second copy replaces a bad first copy
+   * in well under 1 ms. Periodic refresh repairs any retained wrong color. */
   ws2812_last_status = WS2812_SetRGB(red, green, blue);
   if (ws2812_last_status == HAL_OK)
   {
     last_red = red;
     last_green = green;
     last_blue = blue;
+    last_refresh_tick = now;
     ws2812_update_count++;
   }
 }
@@ -1701,20 +1775,32 @@ static void WS2812_AppendByte(uint32_t *bit_pos, uint8_t value)
 
 static HAL_StatusTypeDef WS2812_SetRGB(uint8_t red, uint8_t green, uint8_t blue)
 {
-  uint32_t bit_pos = 0;
+  uint32_t bit_pos = 0U;
+  uint32_t tx_offset = 0U;
+
+  /* Never rewrite the DMA source while SPI1 is still transmitting it. */
+  if (HAL_SPI_GetState(&hspi1) != HAL_SPI_STATE_READY)
+  {
+    return HAL_BUSY;
+  }
 
   memset(ws2812_frame, 0, sizeof(ws2812_frame));
-
   WS2812_AppendByte(&bit_pos, green);
   WS2812_AppendByte(&bit_pos, red);
   WS2812_AppendByte(&bit_pos, blue);
 
-  if (HAL_SPI_Transmit(&hspi1, ws2812_frame, sizeof(ws2812_frame), HAL_MAX_DELAY) != HAL_OK)
+  /* One DMA transaction keeps every encoded WS2812 bit contiguous even when
+   * the 20 kHz FOC ISR preempts the CPU. Each color frame is followed by a
+   * low reset interval, then the identical frame is sent once more. */
+  for (uint8_t repeat = 0U; repeat < LED_TX_REPEAT_COUNT; repeat++)
   {
-    return HAL_ERROR;
+    memcpy(&ws2812_tx_buffer[tx_offset], ws2812_frame, sizeof(ws2812_frame));
+    tx_offset += sizeof(ws2812_frame);
+    memset(&ws2812_tx_buffer[tx_offset], 0, WS2812_RESET_BYTES);
+    tx_offset += WS2812_RESET_BYTES;
   }
 
-  return HAL_SPI_Transmit(&hspi1, ws2812_reset, sizeof(ws2812_reset), HAL_MAX_DELAY);
+  return HAL_SPI_Transmit_DMA(&hspi1, ws2812_tx_buffer, sizeof(ws2812_tx_buffer));
 }
 
 static void BoardTest_SetPass(uint32_t flag, uint8_t passed)

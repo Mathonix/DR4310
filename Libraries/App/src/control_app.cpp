@@ -1,5 +1,7 @@
 #include "control_app.h"
+#include "calibration_store.h"
 
+#include "ControlTiming.hpp"
 #include "CurrentSense.hpp"
 #include "MT6701.hpp"
 #include "HardwareBridge.h"
@@ -17,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace app {
@@ -55,17 +58,19 @@ constexpr float kBootSpeedRadS = kBootSpeedRpm * kRpmToRadS;
  */
 constexpr float kOpenLoopModMin = 0.015f;
 constexpr float kOpenLoopModMax = 0.050f;
-/* Encoder increasing angle vs +iq rotation polarity on this board.
- * With the corrected phase/current map, +iq still decreases encoder
- * angle, so MIT maps torque to -iq. */
-constexpr float kTorqueIqSign = -1.0f;
+/* With encoder direction and electrical zero calibrated, positive Iq
+ * produces positive canonical mechanical velocity on this board. */
+constexpr float kTorqueIqSign = 1.0f;
+/* 16 JustFloat channels at 100 Hz use about 6.8 kB/s, safely below the
+ * 115200-baud UART payload limit while leaving room for RX commands. */
 constexpr uint32_t kVofaDebugPeriodMs = 10U;
 constexpr uint32_t kVofaDebugTimeoutMs = 20U;
 constexpr uint8_t kVofaJustfloatTail0 = 0x00U;
 constexpr uint8_t kVofaJustfloatTail1 = 0x00U;
 constexpr uint8_t kVofaJustfloatTail2 = 0x80U;
 constexpr uint8_t kVofaJustfloatTail3 = 0x7FU;
-constexpr float kDefaultElectricalZeroRad = 0.0f;
+/* Board calibration measured twice on 2026-09-16: 0.12560 / 0.12596 rad. */
+constexpr float kDefaultElectricalZeroRad = 0.12578f;
 constexpr uint8_t kDefaultEncoderDirection = 1U;
 constexpr uint32_t kEncoderValidWindowCycles = 340000U;
 constexpr uint32_t kEncoderFaultTimeoutCycles = 1700000U;
@@ -73,11 +78,14 @@ constexpr uint32_t kEncoderMinValidSamplesForFault = 10U;
 constexpr uint32_t kEncoderTriggerDivider = 2U;
 constexpr uint16_t kDrvFaultSettleMs = 20U;
 constexpr uint16_t kDrvFaultLowDebounceMs = 5U;
-constexpr uint32_t kOuterLoopIsrTicks = 20U;
 constexpr uint32_t kCpuClockHz = 170000000U;
-constexpr size_t kVofaFrameValueCount = 8U;
+constexpr size_t kVofaFrameValueCount = 16U;
 constexpr size_t kVofaFrameBytes = (kVofaFrameValueCount * sizeof(float)) + 4U;
 constexpr size_t kVofaRingFrames = 4U;
+constexpr size_t kVofaRxRingBytes = 128U;
+constexpr size_t kVofaCommandMaxBytes = 48U;
+constexpr float kVofaCurrentKpMax = 20.0f;
+constexpr float kVofaCurrentKiMax = 2500.0f;
 constexpr float kCalibAlignVoltageV = 1.20f;
 constexpr float kCalibDirVoltageV = 0.72f;
 constexpr uint16_t kCalibDirHoldMs = 120U;
@@ -113,6 +121,36 @@ std::array<uint8_t, kVofaFrameBytes> g_vofa_tx_frame = {};
 uint16_t g_vofa_head = 0U;
 uint16_t g_vofa_tail = 0U;
 volatile uint8_t g_vofa_tx_busy = 0U;
+UART_HandleTypeDef *g_vofa_uart = nullptr;
+uint8_t g_vofa_rx_byte = 0U;
+std::array<uint8_t, kVofaRxRingBytes> g_vofa_rx_ring = {};
+volatile uint16_t g_vofa_rx_head = 0U;
+volatile uint16_t g_vofa_rx_tail = 0U;
+
+void VofaRxPushFromIsr(uint8_t byte) {
+  const uint16_t next_head =
+      static_cast<uint16_t>((g_vofa_rx_head + 1U) % kVofaRxRingBytes);
+  if (next_head != g_vofa_rx_tail) {
+    g_vofa_rx_ring[g_vofa_rx_head] = byte;
+    g_vofa_rx_head = next_head;
+  }
+}
+
+bool VofaRxPop(uint8_t &byte) {
+  if (g_vofa_rx_tail == g_vofa_rx_head) {
+    return false;
+  }
+  byte = g_vofa_rx_ring[g_vofa_rx_tail];
+  g_vofa_rx_tail =
+      static_cast<uint16_t>((g_vofa_rx_tail + 1U) % kVofaRxRingBytes);
+  return true;
+}
+
+void VofaStartReceive(UART_HandleTypeDef *uart) {
+  if (uart != nullptr) {
+    (void)HAL_UART_Receive_IT(uart, &g_vofa_rx_byte, 1U);
+  }
+}
 
 void VofaPump(UART_HandleTypeDef *uart) {
   if ((uart == nullptr) || (g_vofa_tx_busy != 0U) ||
@@ -146,6 +184,10 @@ volatile uint8_t control_align_enable = 0U;
 volatile uint8_t control_position_enable = 0U;
 volatile uint8_t control_ident_enable = 0U;
 volatile uint8_t control_calibrate_enable = 0U;
+volatile uint8_t calibration_flash_status = 0U;
+volatile uint8_t calibration_flash_valid = 0U;
+volatile uint32_t calibration_flash_sequence = 0U;
+volatile uint32_t calibration_flash_save_count = 0U;
 
 volatile float control_velocity_ref_rad_s = 0.0f;
 volatile float control_position_target_rad = 0.0f;
@@ -164,7 +206,7 @@ volatile float control_current_pi_kp = 12.0f;
 volatile float control_current_pi_ki = 1500.0f;
 volatile float control_current_pi_out_limit_v = 0.0f;
 volatile float control_current_pi_kaw = 0.5f;
-volatile float control_iq_limit_a = 1.00f;
+volatile float control_iq_limit_a = 2.50f;
 /* 速度环默认 Kp/Ki；上电会使用这里，也可通过 RAM 实时修改。 */
 volatile float control_speed_pi_kp = 0.25f;
 volatile float control_speed_pi_ki = 0.02f;
@@ -181,6 +223,7 @@ volatile float control_mit_vel_rad_s = 0.0f;
 volatile float control_mit_kp = 10.0f;
 volatile float control_mit_kd = 0.5f;
 volatile float control_mit_iq_ff_a = 0.0f;
+volatile uint32_t control_cycle_clock_recovery_count = 0U;
 volatile uint8_t control_debug_cmd = 0U;
 volatile float control_debug_speed_ref_rad_s = 0.0f;
 
@@ -220,6 +263,8 @@ class ApplicationController {
   uint8_t UpdatePowerStageArm(float bus_v);
   void ResetOuterLoopRamps();
   void ApplyIdentResultIfReady();
+  void ProcessVofaCommands();
+  void ExecuteVofaCommand(char *line);
   void SendVofaDebug();
   void UpdateUnwrappedPosition();
   uint8_t ResolveControlMode() const;
@@ -236,6 +281,11 @@ class ApplicationController {
   control::PositionController position_controller_;
   control::TrajectoryGenerator trajectory_;
   control::RotorEstimator rotor_estimator_;
+  /* Independent 1 kHz window estimator for the outer speed loop. The ISR PLL
+   * remains responsible for low-latency electrical angle prediction. */
+  control::RotorEstimator speed_feedback_estimator_;
+  uint32_t last_speed_sample_cycles_ = 0U;
+  bool speed_sample_initialized_ = false;
   control::MotorIdentifier identifier_;
   safety::FaultManager fault_manager_;
   hardware::EncoderSample encoder_ = {};
@@ -286,7 +336,6 @@ class ApplicationController {
   uint32_t last_invalid_sample_count_ = 0U;
   uint32_t last_foc_isr_count_ = 0U;
   uint32_t last_foc_overrun_count_ = 0U;
-  uint8_t outer_loop_due_ = 0U;
   uint32_t last_outer_loop_cyccnt_ = 0U;
   uint32_t outer_loop_count_ = 0U;
   uint32_t outer_loop_miss_count_ = 0U;
@@ -304,6 +353,8 @@ class ApplicationController {
   float calib_angle_cmd_ = 0.0f;
   float calib_voltage_cmd_ = 0.0f;
   uint32_t last_vofa_tick_ = 0U;
+  std::array<char, kVofaCommandMaxBytes> vofa_command_line_ = {};
+  size_t vofa_command_length_ = 0U;
 };
 
 float ApplicationController::Wrap0To2Pi(float angle) {
@@ -719,6 +770,14 @@ void ApplicationController::OnCurrentSample(void *context) {
     return;
   }
 
+  // Debug probe detach can clear TRCENA after Init(). Encoder timestamps and
+  // both estimators must keep working when running standalone, not just on SWD.
+  if (((CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk) == 0U) ||
+      ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U)) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    control_cycle_clock_recovery_count++;
+  }
   const uint32_t isr_start_cycles = DWT->CYCCNT;
   self->UpdateRotorInFocIsr(isr_start_cycles);
   self->foc_.OnPwmUpdate();
@@ -764,6 +823,9 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
                                  TIM_HandleTypeDef *htim_pwm,
                                  UART_HandleTypeDef *huart_debug) {
   debug_uart_ = huart_debug;
+  g_vofa_uart = huart_debug;
+  g_vofa_rx_head = 0U;
+  g_vofa_rx_tail = 0U;
   pwm_timer_ = htim_pwm;
 
   current_sense_.init(*hadc, hdma_adc1);
@@ -773,6 +835,8 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
   DWT->CYCCNT = 0U;
   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
   rotor_estimator_.reset(0.0f, 0U);
+  speed_sample_initialized_ = false;
+  last_speed_sample_cycles_ = 0U;
   rotor_estimator_.setPllParams(control::RotorEstimator::kPllBandwidthHz,
                                 control::RotorEstimator::kPllDamping);
   speed_controller_.init(control_speed_pi_kp,
@@ -837,6 +901,14 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
   control_current_test_iq_ref_a = 0.0f;
   control_encoder_direction = kDefaultEncoderDirection;
   control_electrical_zero_rad = kDefaultElectricalZeroRad;
+  CalibrationStoreData stored_calibration = {};
+  if (CalibrationStore_Load(&stored_calibration) != 0) {
+    control_encoder_direction = stored_calibration.encoder_direction;
+    control_electrical_zero_rad = stored_calibration.electrical_zero_rad;
+    calibration_flash_sequence = stored_calibration.sequence;
+    calibration_flash_valid = 1U;
+    calibration_flash_status = 1U; /* Loaded a valid persisted record. */
+  }
   CalibReset();
   ResetOuterLoopRamps();
   bus_ok_ms_ = 0U;
@@ -844,6 +916,7 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
   DisarmPowerStage();
   last_control_mode_ = kModeIdle; /* force on_mode_enter on first tick */
   last_control_tick_ = HAL_GetTick();
+  VofaStartReceive(debug_uart_);
 }
 
 void ApplicationController::SetCurrentRef(float iq_ref_a) {
@@ -883,6 +956,8 @@ void ApplicationController::SetMitCommand(float pos_rad,
 
 void ApplicationController::Disable() {
   SetMode(kModeIdle);
+  // STOP must remove PWM immediately, not wait for the next scheduled update.
+  DisarmPowerStage();
 }
 
 uint32_t ApplicationController::GetLatchedFaults() const {
@@ -915,6 +990,113 @@ void ApplicationController::ApplyIdentResultIfReady() {
   control_mode_cmd = kModeIdle;
 }
 
+void ApplicationController::ExecuteVofaCommand(char *line) {
+  if (line == nullptr) {
+    return;
+  }
+
+  /* Commands are ASCII and newline terminated. Normalize command names so
+   * VOFA+ buttons may send either upper- or lower-case text. */
+  for (char *p = line; *p != '\0'; ++p) {
+    if ((*p >= 'a') && (*p <= 'z')) {
+      *p = static_cast<char>(*p - ('a' - 'A'));
+    }
+  }
+
+  while ((*line == ' ') || (*line == '\t')) {
+    ++line;
+  }
+  if (*line == '\0') {
+    return;
+  }
+
+  if ((std::strcmp(line, "STOP") == 0) ||
+      (std::strcmp(line, "IDLE") == 0)) {
+    SetCurrentRef(0.0f);
+    Disable();
+    return;
+  }
+  if ((std::strcmp(line, "RUN") == 0) ||
+      (std::strcmp(line, "CURRENT") == 0)) {
+    SetMode(kModeCurrent);
+    return;
+  }
+  if ((std::strcmp(line, "ZERO") == 0) ||
+      (std::strcmp(line, "IQ0") == 0)) {
+    SetCurrentRef(0.0f);
+    return;
+  }
+  if ((std::strcmp(line, "CLEAR") == 0) ||
+      (std::strcmp(line, "CLR") == 0)) {
+    ClearFaults();
+    return;
+  }
+
+  if ((std::strcmp(line, "CALIB") == 0) ||
+      (std::strcmp(line, "CALIBRATE") == 0)) {
+    SetMode(kModeCalibrate);
+    return;
+  }
+
+  char *separator = line;
+  while ((*separator != '\0') && (*separator != ' ') &&
+         (*separator != '\t') && (*separator != '=')) {
+    ++separator;
+  }
+  if (*separator == '\0') {
+    return;
+  }
+  *separator++ = '\0';
+  while ((*separator == ' ') || (*separator == '\t') ||
+         (*separator == '=')) {
+    ++separator;
+  }
+
+  char *end = nullptr;
+  const float value = std::strtof(separator, &end);
+  if ((end == separator) || !std::isfinite(value)) {
+    return;
+  }
+  while ((*end == ' ') || (*end == '\t')) {
+    ++end;
+  }
+  if (*end != '\0') {
+    return;
+  }
+
+  if (std::strcmp(line, "IQ") == 0) {
+    SetCurrentRef(value);
+  } else if (std::strcmp(line, "KP") == 0) {
+    control_current_pi_kp = Clamp(value, 0.0f, kVofaCurrentKpMax);
+  } else if (std::strcmp(line, "KI") == 0) {
+    control_current_pi_ki = Clamp(value, 0.0f, kVofaCurrentKiMax);
+  }
+}
+
+void ApplicationController::ProcessVofaCommands() {
+  uint8_t byte = 0U;
+  while (VofaRxPop(byte)) {
+    if ((byte == '\r') || (byte == '\n')) {
+      if (vofa_command_length_ != 0U) {
+        vofa_command_line_[vofa_command_length_] = '\0';
+        ExecuteVofaCommand(vofa_command_line_.data());
+        vofa_command_length_ = 0U;
+      }
+      continue;
+    }
+
+    if ((byte >= 0x20U) && (byte <= 0x7EU)) {
+      if (vofa_command_length_ < (vofa_command_line_.size() - 1U)) {
+        vofa_command_line_[vofa_command_length_++] =
+            static_cast<char>(byte);
+      } else {
+        /* Drop an overlong command instead of executing a truncated one. */
+        vofa_command_length_ = 0U;
+      }
+    }
+  }
+}
+
 void ApplicationController::SendVofaDebug() {
   if (debug_uart_ == nullptr) {
     return;
@@ -928,14 +1110,26 @@ void ApplicationController::SendVofaDebug() {
 
   const auto &foc = foc_.GetState();
   std::array<float, kVofaFrameValueCount> frame_values = {};
-  frame_values[0] = control_velocity_ref_rad_s;
-  frame_values[1] = active_velocity_ref_rad_s_;
-  frame_values[2] = rotor_estimator_.state().raw_velocity_rad_s;
-  frame_values[3] = rotor_estimator_.state().velocity_rad_s;
-  frame_values[4] = telemetry_.iq_ref_a;
-  frame_values[5] = foc.iq_a;
-  frame_values[6] = rotor_estimator_.state().pll_angle_error_rad;
-  frame_values[7] = rotor_estimator_.state().encoder_sample_age_us;
+  /* VOFA+ JustFloat current-loop monitor channels (100 Hz).
+   * SVPWM duty A/B/C are display-only telemetry; RX commands cannot write
+   * duty values or bypass the closed current loop.
+   */
+  frame_values[0] = foc.id_ref_a;
+  frame_values[1] = foc.id_a;
+  frame_values[2] = foc.iq_ref_a;
+  frame_values[3] = foc.iq_a;
+  frame_values[4] = foc.vd_unsat_v;
+  frame_values[5] = foc.vq_unsat_v;
+  frame_values[6] = foc.vd_sat_v;
+  frame_values[7] = foc.vq_sat_v;
+  frame_values[8] = foc.bus_v;
+  frame_values[9] = static_cast<float>(foc.voltage_saturated);
+  frame_values[10] = speed_feedback_estimator_.state().velocity_rad_s;
+  frame_values[11] = foc.duty_a;
+  frame_values[12] = foc.duty_b;
+  frame_values[13] = foc.duty_c;
+  frame_values[14] = control_current_pi_kp;
+  frame_values[15] = control_current_pi_ki;
 
   std::array<uint8_t, (sizeof(float) * kVofaFrameValueCount) + 4U> frame = {};
   std::memcpy(frame.data(),
@@ -978,6 +1172,8 @@ void ApplicationController::UpdateUnwrappedPosition() {
 }
 
 void ApplicationController::Update() {
+  ProcessVofaCommands();
+
   const auto &foc_snap = foc_.GetState();
   if (foc_snap.isr_overrun_count > last_foc_overrun_count_) {
     last_foc_overrun_count_ = foc_snap.isr_overrun_count;
@@ -986,20 +1182,13 @@ void ApplicationController::Update() {
     }
   }
 
-  const uint32_t foc_isr_count = foc_snap.isr_count;
-  if ((foc_isr_count - last_foc_isr_count_) >= kOuterLoopIsrTicks) {
-    last_foc_isr_count_ = foc_isr_count;
-    outer_loop_due_ = 1U;
-  }
+  // A single scheduler owns the 1 kHz loop. ISR progress is diagnostic only;
+  // OR-ing independent ISR and SysTick triggers used to execute near 2 kHz.
+  last_foc_isr_count_ = foc_snap.isr_count;
   const uint32_t now = HAL_GetTick();
-  if ((now - last_control_tick_) >= kControlPeriodMs) {
-    last_control_tick_ += kControlPeriodMs;
-    outer_loop_due_ = 1U;
-  }
-  if (outer_loop_due_ == 0U) {
+  if (!control::ConsumePeriodicTick(now, last_control_tick_, kControlPeriodMs)) {
     return;
   }
-  outer_loop_due_ = 0U;
 
   const uint32_t cyccnt = DWT->CYCCNT;
   if (last_outer_loop_cyccnt_ != 0U) {
@@ -1017,7 +1206,11 @@ void ApplicationController::Update() {
 
   fault_manager_.clearActiveFaults();
 
-  const auto &encoder_health = encoder_hw_.health();
+  // Keep angle and timestamp from the same DMA publication.
+  const uint32_t encoder_snapshot_primask = __get_PRIMASK();
+  __disable_irq();
+  const auto encoder_health = encoder_hw_.health();
+  __set_PRIMASK(encoder_snapshot_primask);
   const uint32_t last_valid_timestamp_cycles =
       encoder_health.last_valid_timestamp_cycles;
   const uint32_t encoder_now_cycles = DWT->CYCCNT;
@@ -1044,13 +1237,31 @@ void ApplicationController::Update() {
       fault_manager_.setFault(safety::Fault::EncoderComm);
     }
   }
-  (void)encoder_hw_.timeoutStuckTransfer(encoder_now_cycles);
+  (void)encoder_hw_.timeoutStuckTransfer();
   if (encoder_valid_ != 0U) {
     encoder_.angle_rad = encoder_health.last_valid_angle_rad;
     encoder_.angle_deg = encoder_health.last_valid_angle_deg;
     encoder_.status = encoder_health.last_valid_status;
     encoder_.crc_ok = encoder_health.last_valid_crc_ok != 0U;
     encoder_.status_ok = encoder_health.last_valid_status_ok != 0U;
+    const float canonical_angle =
+        control::MechanicalAngleFromEncoder(
+            encoder_.angle_rad,
+            control_encoder_direction == 0U,
+            0.0f);
+    // Use encoder sample time, not an assumed 1 ms host-loop interval.
+    // A repeated sample must not advance the estimator's time window.
+    if (!speed_sample_initialized_) {
+      speed_feedback_estimator_.reset(canonical_angle);
+      last_speed_sample_cycles_ = last_valid_timestamp_cycles;
+      speed_sample_initialized_ = true;
+    } else if (last_valid_timestamp_cycles != last_speed_sample_cycles_) {
+      const float sample_dt_s =
+          static_cast<float>(last_valid_timestamp_cycles - last_speed_sample_cycles_) /
+          static_cast<float>(kCpuClockHz);
+      (void)speed_feedback_estimator_.update(canonical_angle, sample_dt_s);
+      last_speed_sample_cycles_ = last_valid_timestamp_cycles;
+    }
   }
   position_unwrapped_rad_ = rotor_estimator_.state().position_rad;
 
@@ -1108,8 +1319,12 @@ void ApplicationController::Update() {
     foc_.SetOpenLoopVoltage(1U, control_align_voltage_v, 0.0f);
     foc_.SetRefs(0.0f, 0.0f);
   }
-  if ((control_mode != kModeIdle) && !arm_all_ok) {
-    DisarmPowerStage();
+  if (!arm_all_ok &&
+      ((control_mode != kModeIdle) || (last_control_mode_ != kModeIdle))) {
+    // Cancel the persistent request too: recovery of a transient interlock
+    // must never restart the motor without a fresh explicit run command.
+    // last_control_mode_ also covers a latched fault that already resolved IDLE.
+    Disable();
     control_mode = kModeIdle;
   }
 
@@ -1127,7 +1342,7 @@ void ApplicationController::Update() {
   }
 
   float iq_ref = 0.0f;
-  const float mech_vel = rotor_estimator_.state().velocity_rad_s;
+  const float mech_vel = speed_feedback_estimator_.state().velocity_rad_s;
   if (control_mode == kModeSpeed) {
     telemetry_.speed_branch_exec_count++;
     speed_ref_applied_rad_s_ =
@@ -1137,7 +1352,7 @@ void ApplicationController::Update() {
     active_velocity_ref_rad_s_ = speed_ref_applied_rad_s_;
     active_accel_ref_rad_s2_ = 0.0f;
     speed_controller_.setReference(active_velocity_ref_rad_s_);
-    iq_ref = speed_controller_.update(mech_vel, kControlDtS);
+    iq_ref = kTorqueIqSign * speed_controller_.update(mech_vel, kControlDtS);
   } else if (control_mode == kModePosition) {
     const auto &traj = trajectory_.update(position_unwrapped_rad_, kControlDtS);
     active_position_ref_rad_ = traj.position_rad;
@@ -1152,7 +1367,7 @@ void ApplicationController::Update() {
               -control_position_velocity_limit_rad_s,
               control_position_velocity_limit_rad_s);
     speed_controller_.setReference(active_velocity_ref_rad_s_);
-    iq_ref = speed_controller_.update(mech_vel, kControlDtS);
+    iq_ref = kTorqueIqSign * speed_controller_.update(mech_vel, kControlDtS);
   } else if (control_mode == kModeMit) {
     const float position_error = control_mit_pos_rad - position_unwrapped_rad_;
     const float velocity_error = control_mit_vel_rad_s - mech_vel;
@@ -1169,7 +1384,7 @@ void ApplicationController::Update() {
     active_accel_ref_rad_s2_ = 0.0f;
   }
 
-  float omega_e = rotor_estimator_.state().velocity_rad_s * kMotorPolePairs;
+  float omega_e = mech_vel * kMotorPolePairs;
   foc_.SetOmegaE(omega_e);
 
   if ((control_current_pi_kp != applied_current_pi_kp_) ||
@@ -1266,7 +1481,23 @@ void ApplicationController::Update() {
       control_enable = 0U;
       control_mode_cmd = kModeIdle;
       if (calib_state_ == CalibState::kDone) {
-        calib_state_ = CalibState::kIdle;
+        CalibrationStoreData calibration = {};
+        calibration.electrical_zero_rad = control_electrical_zero_rad;
+        calibration.encoder_direction = control_encoder_direction;
+        uint32_t saved_sequence = 0U;
+        if (CalibrationStore_Save(&calibration, &saved_sequence) != 0) {
+          calibration_flash_sequence = saved_sequence;
+          calibration_flash_valid = 1U;
+          calibration_flash_status = 2U; /* Saved and read-back verified. */
+          calibration_flash_save_count++;
+          calib_state_ = CalibState::kIdle;
+        } else {
+          calibration_flash_status = 3U; /* Calibration ran, save failed. */
+          calib_state_ = CalibState::kFail;
+        }
+        /* Flash erase/program stalls the CPU; restart the outer-loop deadline
+         * reference so an intentional parameter save is not a control fault. */
+        last_control_tick_ = HAL_GetTick();
       }
     } else {
       foc_.SetAngleOverride(1U, calib_angle_cmd_);
@@ -1368,10 +1599,10 @@ void ApplicationController::Update() {
   const auto &ident = identifier_.GetStatus();
 
   telemetry_.angle_deg = encoder_.angle_deg;
-  telemetry_.velocity_rad_s = rotor_estimator_.state().velocity_rad_s;
+  telemetry_.velocity_rad_s = speed_feedback_estimator_.state().velocity_rad_s;
   telemetry_.accel_rad_s2 = rotor_estimator_.state().acceleration_rad_s2;
   telemetry_.legacy_window_velocity_rad_s =
-      rotor_estimator_.state().legacy_window_velocity_rad_s;
+      speed_feedback_estimator_.state().legacy_window_velocity_rad_s;
   telemetry_.pll_angle_error_rad =
       rotor_estimator_.state().pll_angle_error_rad;
   telemetry_.pll_measurement_dt_us =
@@ -1444,6 +1675,10 @@ void ApplicationController::Update() {
   telemetry_.calib_state = static_cast<uint8_t>(calib_state_);
   telemetry_.encoder_direction = control_encoder_direction;
   telemetry_.electrical_zero_rad = control_electrical_zero_rad;
+  telemetry_.calibration_flash_status = calibration_flash_status;
+  telemetry_.calibration_flash_valid = calibration_flash_valid;
+  telemetry_.calibration_flash_sequence = calibration_flash_sequence;
+  telemetry_.calibration_flash_save_count = calibration_flash_save_count;
 
   SendVofaDebug();
   (void)pwm_timer_;
@@ -1458,13 +1693,23 @@ ApplicationController g_application;
 }  // namespace app
 
 extern "C" void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
-  (void)huart;
-  app::g_vofa_tx_busy = 0U;
+  if (huart == app::g_vofa_uart) {
+    app::g_vofa_tx_busy = 0U;
+  }
+}
+
+extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+  if (huart == app::g_vofa_uart) {
+    app::VofaRxPushFromIsr(app::g_vofa_rx_byte);
+    app::VofaStartReceive(huart);
+  }
 }
 
 extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
-  (void)huart;
-  app::g_vofa_tx_busy = 0U;
+  if (huart == app::g_vofa_uart) {
+    app::g_vofa_tx_busy = 0U;
+    app::VofaStartReceive(huart);
+  }
 }
 
 extern "C" void ControlApp_Init(ADC_HandleTypeDef *hadc,

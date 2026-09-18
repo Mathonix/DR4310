@@ -54,6 +54,7 @@ void RotorEstimator::reset(float angle_rad, uint32_t timestamp_cycles) {
   pll_sample_count_ = 0U;
   pll_initialized_ = true;
   pll_first_sample_pending_ = true;
+  consecutive_rejected_innovations_ = 0U;
   UpdatePllCoefficients();
 }
 
@@ -178,12 +179,33 @@ void RotorEstimator::correct(float angle_rad,
 
   if (std::fabs(innovation) > kMaxInnovationRad) {
     state_.pll_angle_error_rad = innovation;
+    last_sample_timestamp_cycles_ = measurement_timestamp_cycles;
+    consecutive_rejected_innovations_++;
+    if (consecutive_rejected_innovations_ >= kMaxRejectedInnovations) {
+      /* Persistent bad data can otherwise leave the predictor running away
+       * forever while every following sample is rejected. Re-lock to the
+       * measured phase and restart velocity estimation from a safe state. */
+      state_.theta_mech_est_rad += innovation;
+      state_.position_rad = state_.theta_mech_est_rad;
+      state_.angle_wrapped_rad = angle_rad;
+      state_.omega_est_rad_s = 0.0f;
+      state_.velocity_rad_s = 0.0f;
+      state_.pll_sample_count = 0U;
+      state_.pll_locked = 0U;
+      pll_sample_count_ = 0U;
+      consecutive_rejected_innovations_ = 0U;
+    }
     return;
   }
+  consecutive_rejected_innovations_ = 0U;
 
   const float kp = pll_kp_;
   const float ki = pll_ki_;
   state_.omega_est_rad_s += ki * innovation * measurement_dt_s;
+  state_.omega_est_rad_s =
+      std::clamp(state_.omega_est_rad_s,
+                 -kMaxAbsVelocityRadS,
+                 kMaxAbsVelocityRadS);
   const float theta_est_at_meas_corrected =
       theta_est_at_meas + (kp * innovation * measurement_dt_s);
   state_.theta_mech_est_rad =

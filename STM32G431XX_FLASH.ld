@@ -16,7 +16,7 @@
 **
 **  Target      : STMicroelectronics STM32
 **
-**  Distribution: The file is distributed “as is,” without any warranty
+**  Distribution: The file is distributed 鈥渁s is,鈥?without any warranty
 **                of any kind.
 **
 *****************************************************************************
@@ -56,7 +56,7 @@ ENTRY(Reset_Handler)
 MEMORY
 {
 RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 32K
-FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 128K
+FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 124K /* last 4K reserved for calibration */
 }
 
 /* Highest address of the user mode stack */

@@ -19,7 +19,7 @@ constexpr float kDefaultCurrentKi = 1500.0f;
 constexpr float kDefaultCurrentOutLimitV = 0.0f;
 constexpr float kDutyMin = 0.02f;
 constexpr float kDutyMax = 0.98f;
-/* DRV8313 peak hard trip (instant, ISR). Work limit is 2.5A. */
+/* DRV8313 peak hard trip (instant, ISR), separate from configured Iq work limit. */
 constexpr float kOvercurrentTripA = 3.50f;
 /* 0 = standard d=flux / q=torque; 1 = experimental swap. */
 constexpr bool kSwapDq = false;

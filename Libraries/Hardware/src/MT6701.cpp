@@ -279,12 +279,20 @@ void MT6701::onDmaError() {
   ResetSpiToReady();
 }
 
-bool MT6701::timeoutStuckTransfer(uint32_t now_cycles) {
+bool MT6701::timeoutStuckTransfer() {
+  // The FOC ISR can start a new transfer between the caller's timestamp and
+  // this check. Subtracting that newer start from stale "now" wraps uint32_t
+  // and falsely aborts a healthy transfer. Check + recovery must also be atomic
+  // with respect to DMA completion and the next FOC-triggered SPI transfer.
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
   if (transfer_in_flight_ == 0U) {
+    __set_PRIMASK(primask);
     return false;
   }
-  const uint32_t elapsed_cycles = now_cycles - start_timestamp_cycles_;
+  const uint32_t elapsed_cycles = TimestampCycles() - start_timestamp_cycles_;
   if (elapsed_cycles < kDmaTimeoutCycles) {
+    __set_PRIMASK(primask);
     return false;
   }
 
@@ -294,6 +302,7 @@ bool MT6701::timeoutStuckTransfer(uint32_t now_cycles) {
   transfer_in_flight_ = 0U;
   health_.dma_error_count++;
   ResetSpiToReady();
+  __set_PRIMASK(primask);
   return true;
 }
 

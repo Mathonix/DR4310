@@ -49,6 +49,8 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    Libraries/App/src/gm6020_can.c
+    Libraries/App/src/calibration_store.c
     Libraries/App/src/control_app.cpp
     Libraries/Control/src/foc_control.cpp
     Libraries/Control/src/speed_controller.cpp
@@ -76,9 +78,15 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     Libraries/Safety/inc
 )
 
+# Board identity is compiled into each image; never silently wrap invalid IDs.
+set(MOTOR_CAN_ID "2" CACHE STRING "Motor CAN ID (1..7)")
+if(NOT MOTOR_CAN_ID MATCHES "^[1-7]$")
+    message(FATAL_ERROR "MOTOR_CAN_ID must be one integer in 1..7")
+endif()
+message(STATUS "Motor CAN ID: ${MOTOR_CAN_ID}")
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined symbols
+    MOTOR_CAN_ID=${MOTOR_CAN_ID}
 )
 
 # Remove wrong libob.a library dependency when using cpp files

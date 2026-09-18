@@ -41,3 +41,20 @@ docs/mt6701_datasheet.txt
 *.hex
 *.bin
 *.map
+
+# Host regression tests for motor control fixes
+!tests/
+tests/*
+!tests/test_control_timing.cpp
+!tests/test_motor_safety_regressions.py
+!tests/test_rotor_estimator.cpp
+
+# ID-specific firmware and PCAN protocol verification
+!tests/test_gm6020_can.cpp
+!tools/
+tools/*
+!tools/build_flash_motor.py
+!tools/pcan_gm6020_test.py
+
+# Project Python tool environment
+!requirements-tools.txt
