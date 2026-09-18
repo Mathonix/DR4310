@@ -87,6 +87,22 @@ JLink.exe -device STM32G431KB -if SWD -speed 1000 -autoconnect 1 -CommanderScrip
 
 速度环输出上限和积分上限都由 `control_iq_limit_a` 控制。修改该变量后，主循环会重新初始化速度 PI 和 FOC Iq 限幅。
 
+## Automatic-enable mode and automatic disable conditions
+
+The native CAN protocol supports automatic-enable mode through command `0x08` on the native control ID (default `0x102`):
+
+- `data[0] = 0x08`, `data[1] = 1`: enable automatic-enable mode.
+- `data[0] = 0x08`, `data[1] = 0`: disable automatic-enable mode.
+- While enabled, native CAN `disable` (`0x00`), `estop` (`0x03`), and GM6020 zero-current disable frames are ignored. Control setpoints remain valid.
+- The controller keeps retrying power-stage enable after temporary safety conditions recover.
+- The power stage is automatically disabled and the active control request is canceled when a latched motor/control fault is detected, including:
+  - current-sense failure or over-current protection;
+  - encoder communication, CRC, or magnetic-status failure;
+  - DRV8313 driver fault (`nFAULT`);
+  - bus undervoltage or overvoltage;
+  - FOC ISR overrun or outer-loop deadline fault.
+- If bus voltage, encoder, current-sense, or driver readiness is temporarily insufficient but no fault is latched, the power stage remains off and the controller retries automatically.
+
 ## 故障灯与报错数组
 
 WS2812 故障灯颜色和闪烁次数：
