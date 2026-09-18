@@ -223,6 +223,17 @@ Byte 2–5 = float32 little-endian value
 
 ---
 
+## Automatic-enable mode
+
+Send command `0x08` to the native control ID (default `0x102`) to control automatic-enable mode:
+
+- `data[0] = 0x08`, `data[1] = 1`: enable automatic-enable mode.
+- `data[0] = 0x08`, `data[1] = 0`: disable automatic-enable mode and restore CAN enable/disable control.
+- While enabled, native `disable` (`0x00`) and `estop` (`0x03`) commands are ignored. Current, speed, position, and MIT setpoints remain active.
+- A zero-current GM6020 disable frame is also ignored; normal nonzero current commands remain active.
+- The firmware keeps checking bus voltage, current sensing, encoder, and driver status, then retries enabling when all conditions are safe.
+- A latched fault is the condition that actively disables the motor. After the fault is cleared, automatic enabling can resume.
+
 ## 6. 原生状态反馈
 
 状态 ID：

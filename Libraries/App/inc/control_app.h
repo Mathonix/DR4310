@@ -9,6 +9,7 @@
 #define CTRL_MODE_SPEED      2U
 #define CTRL_MODE_POSITION   3U
 #define CTRL_MODE_MIT        4U
+#define CTRL_MODE_AUTO_ENABLE 5U  /* Supervisory mode: ignore CAN enable/disable. */
 
 /* Internal/debug modes (still reported in telemetry.control_mode). */
 #define CTRL_MODE_ALIGN      10U
@@ -81,6 +82,7 @@ typedef struct
   uint8_t arm_no_fault;
   uint8_t arm_all_ok;
   uint8_t control_mode;
+  uint8_t auto_enable;
   uint8_t ident_state;
   uint8_t calib_state;
   uint8_t encoder_direction;
@@ -101,6 +103,8 @@ const ControlTelemetry_t *ControlApp_GetTelemetry(void);
 
 /* Unified mode API */
 void ControlApp_SetMode(uint8_t mode);
+void ControlApp_SetAutoEnable(uint8_t enable);
+uint8_t ControlApp_GetAutoEnable(void);
 uint8_t ControlApp_GetMode(void);
 void ControlApp_SetCurrentRef(float iq_ref_a);
 void ControlApp_SetSpeedRef(float velocity_ref_rad_s);
@@ -112,6 +116,9 @@ uint32_t ControlApp_GetLatchedFaults(void);
 
 /* Primary mode selector (CTRL_MODE_*). */
 extern volatile uint8_t control_mode_cmd;
+/* Automatic-enable supervisory mode. CAN enable/disable commands are ignored
+ * while set; the controller re-arms whenever safety conditions recover. */
+extern volatile uint8_t control_auto_enable;
 
 /* Legacy / debug flags (still supported). */
 extern volatile uint8_t control_enable;

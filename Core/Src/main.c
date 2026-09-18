@@ -77,6 +77,7 @@ typedef struct
 #define CAN_CMD_POSITION        0x05U
 #define CAN_CMD_MIT             0x06U
 #define CAN_CMD_SET_MODE        0x07U
+#define CAN_CMD_SET_AUTO_ENABLE 0x08U
 #define CAN_PID_CURRENT_KP      0x01U
 #define CAN_PID_CURRENT_KI      0x02U
 #define CAN_PID_CURRENT_LIMIT   0x03U
@@ -1060,8 +1061,11 @@ static void CAN_ExternalDebugUpdate(void)
   if (GM6020_CheckSession(&gm6020_session, now,
       (ControlApp_GetMode() == CTRL_MODE_CURRENT) && control->arm_all_ok))
   {
-    ControlApp_Disable();
-    can_control_mode = CAN_MODE_DISABLED;
+    if (ControlApp_GetAutoEnable() == 0U)
+    {
+      ControlApp_Disable();
+      can_control_mode = CAN_MODE_DISABLED;
+    }
     gm6020_timeout_or_interlock_count++;
   }
 
@@ -1089,12 +1093,21 @@ static void CAN_ExternalDebugUpdate(void)
     if (GM6020_DecodeCurrent(MOTOR_CAN_ID, rx_header.Identifier, rx_data, 8U, 1U, &amps))
     {
       gm6020_rx_count++;
+      /* A zero GM6020 current is the protocol's disable command. */
+      if ((ControlApp_GetAutoEnable() != 0U) && (amps == 0.0f))
+      {
+        GM6020_Cancel(&gm6020_session);
+        continue;
+      }
       int action = GM6020_Accept(&gm6020_session, HAL_GetTick(), amps,
           control->arm_all_ok && !control->fault_flags && !ControlApp_GetLatchedFaults(),
           ControlApp_GetMode() == CTRL_MODE_IDLE);
       if (action < 0)
       {
-        ControlApp_Disable(); can_control_mode = CAN_MODE_DISABLED; can_control_target = 0.0f;
+        if (ControlApp_GetAutoEnable() == 0U)
+        {
+          ControlApp_Disable(); can_control_mode = CAN_MODE_DISABLED; can_control_target = 0.0f;
+        }
       }
       else if (action > 0)
       {
@@ -1105,7 +1118,10 @@ static void CAN_ExternalDebugUpdate(void)
     }
     else
     {
-      if (gm6020_session.active) ControlApp_Disable();
+      if ((gm6020_session.active) && (ControlApp_GetAutoEnable() == 0U))
+      {
+        ControlApp_Disable();
+      }
       GM6020_Cancel(&gm6020_session);
       CAN_ApplyControlFrame(rx_header.Identifier, rx_data);
     }
@@ -1320,6 +1336,23 @@ static void CAN_ApplyControlFrame(uint32_t id, const uint8_t *data)
   cmd = data[0];
   memcpy(&target, &data[2], sizeof(float));
   can_control_last_cmd = cmd;
+
+  /* Supervisory automatic-enable command. Byte 1 selects the mode. */
+  if (cmd == CAN_CMD_SET_AUTO_ENABLE)
+  {
+    ControlApp_SetAutoEnable((data[1] != 0U) ? 1U : 0U);
+    can_control_rx_count++;
+    return;
+  }
+
+  /* In automatic-enable mode, CAN cannot explicitly disable the motor.
+   * Setpoint and control-mode commands remain accepted. */
+  if ((ControlApp_GetAutoEnable() != 0U) &&
+      ((cmd == CAN_CMD_DISABLE) || (cmd == CAN_CMD_ESTOP)))
+  {
+    can_control_rx_count++;
+    return;
+  }
 
   /*
    * Once MIT is active the control ID carries pure Cheetah 8-byte packs.

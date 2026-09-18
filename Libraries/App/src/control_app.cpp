@@ -175,6 +175,7 @@ void VofaPump(UART_HandleTypeDef *uart) {
 
 /* Unified mode: boot IDLE so shaft is free until host arms a mode. */
 volatile uint8_t control_mode_cmd = CTRL_MODE_IDLE;
+volatile uint8_t control_auto_enable = 0U;
 
 /* Legacy flags kept for debug/old scripts. */
 volatile uint8_t control_enable = 0U;
@@ -237,6 +238,8 @@ class ApplicationController {
             UART_HandleTypeDef *huart_debug);
   void Update();
   void SetMode(uint8_t mode);
+  void SetAutoEnable(uint8_t enable);
+  uint8_t GetAutoEnable() const;
   void SetCurrentRef(float iq_ref_a);
   void SetSpeedRef(float velocity_ref_rad_s);
   void SetPositionRef(float position_target_rad);
@@ -635,6 +638,24 @@ void ApplicationController::ResetOuterLoopRamps() {
   active_position_ref_rad_ = position_unwrapped_rad_;
   active_accel_ref_rad_s2_ = 0.0f;
   current_test_iq_ref_a_ = 0.0f;
+}
+
+void ApplicationController::SetAutoEnable(uint8_t enable) {
+  control_auto_enable = (enable != 0U) ? 1U : 0U;
+  if (control_auto_enable != 0U) {
+    /* Preserve the current CAN-selected control mode. If none exists, use a
+     * zero-speed mode so the normal arm gate can retry automatically. */
+    if (control_mode_cmd == kModeIdle) {
+      SetMode(kModeSpeed);
+      control_velocity_ref_rad_s = 0.0f;
+    } else {
+      control_enable = 1U;
+    }
+  }
+}
+
+uint8_t ApplicationController::GetAutoEnable() const {
+  return control_auto_enable;
 }
 
 void ApplicationController::SetMode(uint8_t mode) {
@@ -1311,6 +1332,22 @@ void ApplicationController::Update() {
     power_stage_armed_ = 1U;
   }
 
+  /* Automatic-enable mode owns the enable decision without overwriting
+   * current/speed/position/MIT references received over CAN. */
+  if ((control_auto_enable != 0U) &&
+      !fault_manager_.hasLatchedFault() &&
+      (control_mode_cmd == kModeIdle) &&
+      (control_current_test_enable == 0U) &&
+      (control_position_enable == 0U) &&
+      (control_open_loop_enable == 0U) &&
+      (control_align_enable == 0U) &&
+      (control_ident_enable == 0U) &&
+      (control_calibrate_enable == 0U)) {
+    control_mode_cmd = kModeSpeed;
+    control_enable = 1U;
+    control_velocity_ref_rad_s = 0.0f;
+  }
+
   uint8_t control_mode = ResolveControlMode();
   if ((control_align_enable != 0U) && arm_all_ok) {
     control_mode = kModeAlign;
@@ -1319,11 +1356,14 @@ void ApplicationController::Update() {
     foc_.SetOpenLoopVoltage(1U, control_align_voltage_v, 0.0f);
     foc_.SetRefs(0.0f, 0.0f);
   }
+  const bool auto_retry_without_fault =
+      (control_auto_enable != 0U) && !fault_manager_.hasLatchedFault();
   if (!arm_all_ok &&
-      ((control_mode != kModeIdle) || (last_control_mode_ != kModeIdle))) {
-    // Cancel the persistent request too: recovery of a transient interlock
-    // must never restart the motor without a fresh explicit run command.
-    // last_control_mode_ also covers a latched fault that already resolved IDLE.
+      ((control_mode != kModeIdle) || (last_control_mode_ != kModeIdle)) &&
+      !auto_retry_without_fault) {
+    // In normal mode a transient interlock cancels the persistent request.
+    // Automatic-enable mode deliberately keeps it and retries on the next
+    // cycle; a latched fault still takes the motor to IDLE immediately.
     Disable();
     control_mode = kModeIdle;
   }
@@ -1458,12 +1498,20 @@ void ApplicationController::Update() {
   }
 
   if (control_mode == kModeAlign) {
-    ArmPowerStage();
+    if (arm_all_ok) {
+      ArmPowerStage();
+    } else {
+      DisarmPowerStage();
+    }
     foc_.SetAngleOverride(1U, control_align_angle_rad);
     foc_.SetOpenLoopVoltage(1U, control_align_voltage_v, 0.0f);
     foc_.SetRefs(0.0f, 0.0f);
   } else if (control_mode == kModeCalibrate) {
-    ArmPowerStage();
+    if (arm_all_ok) {
+      ArmPowerStage();
+    } else {
+      DisarmPowerStage();
+    }
     if (encoder_valid_ != 0U) {
       CalibStep(encoder_.angle_rad);
     } else {
@@ -1505,7 +1553,11 @@ void ApplicationController::Update() {
       foc_.SetRefs(0.0f, 0.0f);
     }
   } else if (control_mode == kModeIdent) {
-    ArmPowerStage();
+    if (arm_all_ok) {
+      ArmPowerStage();
+    } else {
+      DisarmPowerStage();
+    }
     if (ident_started_ == 0U) {
       identifier_.Start();
       ident_started_ = 1U;
@@ -1671,6 +1723,7 @@ void ApplicationController::Update() {
   telemetry_.outer_loop_dt_us = outer_loop_dt_us_;
   telemetry_.outer_loop_dt_max_us = outer_loop_dt_max_us_;
   telemetry_.control_mode = control_mode;
+  telemetry_.auto_enable = control_auto_enable;
   telemetry_.ident_state = static_cast<uint8_t>(ident.state);
   telemetry_.calib_state = static_cast<uint8_t>(calib_state_);
   telemetry_.encoder_direction = control_encoder_direction;
@@ -1744,6 +1797,14 @@ extern "C" void ControlApp_SetMode(uint8_t mode) {
 
 extern "C" uint8_t ControlApp_GetMode(void) {
   return control_mode_cmd;
+}
+
+extern "C" void ControlApp_SetAutoEnable(uint8_t enable) {
+  app::g_application.SetAutoEnable(enable);
+}
+
+extern "C" uint8_t ControlApp_GetAutoEnable(void) {
+  return app::g_application.GetAutoEnable();
 }
 
 extern "C" void ControlApp_SetCurrentRef(float iq_ref_a) {
