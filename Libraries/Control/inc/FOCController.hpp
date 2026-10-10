@@ -57,6 +57,9 @@ class FocController {
   void SetCurrentPi(float kp, float ki, float out_limit_v);
   void SetCurrentKaw(float kaw);
   void SetMotorParams(const control::MotorParams &params);
+  /* Undervoltage disable inside the 20 kHz ISR. Values below 6 V are raised
+   * to 6 V. The application pushes max(6 V, VBUS_MIN). */
+  void SetMinBusVoltage(float min_v);
   void SetDecouplingEnable(uint8_t enable);
   void SetMaxModulation(float max_mod);
   void SetRefs(float id_ref_a, float iq_ref_a);
@@ -98,6 +101,7 @@ class FocController {
   CurrentLoopController current_loop_;
   hardware::CurrentSample last_current_ = {};
   float iq_limit_ = 2.50f;
+  volatile float min_bus_v_ = 6.0f;
   float pi_out_limit_v_ = 0.0f;
   float cached_vmax_ = 0.0f;
   uint8_t vmax_div_ = 0U;

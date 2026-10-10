@@ -1,6 +1,7 @@
 #include "FOCController.hpp"
 
 #include "SVPWM.hpp"
+#include "iq_limits.h"
 
 #include <algorithm>
 #include <cmath>
@@ -19,8 +20,11 @@ constexpr float kDefaultCurrentKi = 1500.0f;
 constexpr float kDefaultCurrentOutLimitV = 0.0f;
 constexpr float kDutyMin = 0.02f;
 constexpr float kDutyMax = 0.98f;
-/* DRV8313 peak hard trip (instant, ISR), separate from configured Iq work limit. */
+/* DRV8313 peak hard trip (instant, ISR), separate from configured Iq work limit.
+ * Do not raise this to follow OL_IQ. IQ_HARD_MAX_A stays strictly below it. */
 constexpr float kOvercurrentTripA = 3.50f;
+static_assert(IQ_HARD_MAX_A < kOvercurrentTripA,
+              "IQ_HARD_MAX_A must stay below the phase hard trip");
 /* 0 = standard d=flux / q=torque; 1 = experimental swap. */
 constexpr bool kSwapDq = false;
 /* Refresh PI output limits every N FOC ticks (~1 kHz at 20 kHz). */
@@ -192,7 +196,11 @@ void FocController::Enable(uint8_t enable) {
 }
 
 void FocController::SetCurrentLimit(float iq_limit_a) {
-  iq_limit_ = std::fabs(iq_limit_a);
+  float limit = std::fabs(iq_limit_a);
+  if (!(limit <= IQ_HARD_MAX_A)) {
+    limit = (!(limit >= 0.0f)) ? 0.0f : IQ_HARD_MAX_A;
+  }
+  iq_limit_ = limit;
 }
 
 void FocController::SetCurrentPi(float kp, float ki, float out_limit_v) {
@@ -215,10 +223,23 @@ void FocController::SetCurrentKaw(float kaw) {
 }
 
 void FocController::SetMotorParams(const MotorParams &params) {
-  motor_ = params;
-  if (motor_.pole_pairs < 1.0f) {
-    motor_.pole_pairs = 1.0f;
+  MotorParams next = params;
+  if (next.pole_pairs < 1.0f) {
+    next.pole_pairs = 1.0f;
   }
+  /* The 20 kHz ISR reads motor_ while this runs on the main loop. Build the
+   * new value first, then publish the whole struct with IRQs off. */
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  motor_ = next;
+  __set_PRIMASK(primask);
+}
+
+void FocController::SetMinBusVoltage(float min_v) {
+  if (!(min_v >= kMinBusV)) {
+    min_v = kMinBusV;
+  }
+  min_bus_v_ = min_v;
 }
 
 void FocController::SetDecouplingEnable(uint8_t enable) {
@@ -305,7 +326,7 @@ void FocController::OnPwmUpdate() {
     return;
   }
 
-  if (bus_v < kMinBusV) {
+  if (bus_v < min_bus_v_) {
     Enable(0U);
     WritePwm(0.0f, 0.0f, 0.0f);
     isr_busy_ = 0U;

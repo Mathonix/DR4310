@@ -10,6 +10,9 @@
 #define GM6020_COMMAND_ID ((MOTOR_CAN_ID <= 4) ? 0x1FEU : 0x2FEU)
 #define GM6020_FEEDBACK_ID (0x204U + MOTOR_CAN_ID)
 #define GM6020_COMMAND_TIMEOUT_MS 100U
+/* Runtime variants: the CAN ID now comes from the flash config at boot. */
+#define GM6020_CommandIdFor(id) (((id) <= 4U) ? 0x1FEU : 0x2FEU)
+#define GM6020_FeedbackIdFor(id) (0x204U + (uint32_t)(id))
 #ifdef __cplusplus
 extern "C" {
 #endif

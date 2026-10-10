@@ -1,5 +1,7 @@
 #include "SpeedController.hpp"
 
+#include "iq_limits.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -17,6 +19,16 @@ void SpeedController::init(float kp, float ki, float iq_limit_a) {
   speed_pi_.init(kp, ki, -iq_limit_a_, iq_limit_a_);
   velocity_ref_rad_s_ = 0.0f;
   iq_ref_applied_a_ = 0.0f;
+}
+
+void SpeedController::setIqLimit(float iq_limit_a) {
+  float limit = std::fabs(iq_limit_a);
+  if (!(limit <= IQ_HARD_MAX_A)) {
+    limit = (!(limit >= 0.0f)) ? 0.0f : IQ_HARD_MAX_A;
+  }
+  iq_limit_a_ = limit;
+  speed_pi_.setOutputLimits(-iq_limit_a_, iq_limit_a_);
+  iq_ref_applied_a_ = std::clamp(iq_ref_applied_a_, -iq_limit_a_, iq_limit_a_);
 }
 
 void SpeedController::reset() {

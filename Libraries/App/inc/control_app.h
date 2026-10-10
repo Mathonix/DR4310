@@ -103,6 +103,9 @@ const ControlTelemetry_t *ControlApp_GetTelemetry(void);
 
 /* Unified mode API */
 void ControlApp_SetMode(uint8_t mode);
+/* 1 after a fresh encoder sample has initialized the rotor position.
+ * Position and MIT entry is refused until then. */
+uint8_t ControlApp_PositionEncoderReady(void);
 void ControlApp_SetAutoEnable(uint8_t enable);
 uint8_t ControlApp_GetAutoEnable(void);
 uint8_t ControlApp_GetMode(void);
@@ -113,6 +116,9 @@ void ControlApp_SetMitCommand(float pos_rad, float vel_rad_s, float kp, float kd
 void ControlApp_Disable(void);
 void ControlApp_ClearFault(void);
 uint32_t ControlApp_GetLatchedFaults(void);
+/* Any valid host command (UART line, native CAN frame, GM6020 frame) feeds
+ * the optional command-timeout watchdog (config key TIMEOUT_MS). */
+void ControlApp_NotifyHostActivity(void);
 
 /* Primary mode selector (CTRL_MODE_*). */
 extern volatile uint8_t control_mode_cmd;
@@ -150,13 +156,27 @@ extern volatile float control_current_pi_ki;
 extern volatile float control_current_pi_out_limit_v;
 extern volatile float control_current_pi_kaw;
 extern volatile float control_iq_limit_a;
+/* Overload mode. OL_EN is 0 or 1. OL_IQ is amperes, >= IQ_LIM and
+ * <= IQ_HARD_MAX_A. OL_TIME_S is seconds, 0..10 (0 disables). */
+extern volatile float control_ol_en;
+extern volatile float control_ol_iq_a;
+extern volatile float control_ol_time_s;
 extern volatile float control_speed_pi_kp;
 extern volatile float control_speed_pi_ki;
 extern volatile float control_speed_pi_kd;
 extern volatile float control_accel_ref_rad_s2;
 extern volatile float control_electrical_zero_rad;
-/* 1 = QDrive encoder_direction true; 0 = inverted. */
+/* 1 = QDrive encoder_direction true; 0 = inverted.
+ * Live commutation direction. ENC_DIR is the value applied at the next boot. */
 extern volatile uint8_t control_encoder_direction;
+/* Undervoltage / overvoltage thresholds (volts). Overvoltage sets Fault bit 7. */
+extern volatile float control_vbus_min_v;
+extern volatile float control_vbus_max_v;
+/* Mechanical angle, radians, that position feedback treats as zero once set. */
+extern volatile float control_zero_offset_rad;
+/* Stator resistance and inductance used by the motor model. */
+extern volatile float control_rs_ohm;
+extern volatile float control_ls_h;
 extern volatile float control_max_modulation;
 extern volatile uint8_t control_decoupling_enable;
 

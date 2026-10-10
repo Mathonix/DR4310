@@ -64,7 +64,7 @@ void MotorIdentifier::EnterState(MotorIdState state) {
 bool MotorIdentifier::CheckSafety(const FOCState &foc,
                                   float bus_v,
                                   float omega_e_rad_s) {
-  if (bus_v < 6.0f) {
+  if (bus_v < min_bus_v_) {
     ident_.fail_reason = static_cast<uint8_t>(FailReason::kBus);
     return true;
   }
@@ -89,6 +89,14 @@ bool MotorIdentifier::CheckSafety(const FOCState &foc,
   }
 
   return false;
+}
+
+void MotorIdentifier::SetMinBusV(float min_v) {
+  constexpr float kHardMinBusV = 6.0f;
+  if (!(min_v >= kHardMinBusV)) {
+    min_v = kHardMinBusV;
+  }
+  min_bus_v_ = min_v;
 }
 
 void MotorIdentifier::Init() {

@@ -51,8 +51,12 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Libraries/App/src/gm6020_can.c
     Libraries/App/src/calibration_store.c
+    Libraries/App/src/store_record.c
+    Libraries/App/src/device_config.c
+    Libraries/App/src/ascii_util.c
     Libraries/App/src/control_app.cpp
     Libraries/Control/src/foc_control.cpp
+    Libraries/Control/src/overload_limiter.cpp
     Libraries/Control/src/speed_controller.cpp
     Libraries/Control/src/position_controller.cpp
     Libraries/Control/src/trajectory_generator.cpp

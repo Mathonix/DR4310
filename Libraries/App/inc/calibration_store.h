@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "store_record.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -18,11 +20,17 @@ typedef struct {
   uint32_t sequence;
 } CalibrationStoreData;
 
-/* Returns 1 only for a versioned, CRC-valid, physically valid record. */
+/* Returns 1 only if the newest valid record (v1..v4) carries calibration. */
 int CalibrationStore_Load(CalibrationStoreData *data);
-/* Alternates pages and verifies the newly programmed record before returning. */
+/* Writes a v4 record: new calibration + the config already in flash (if any).
+ * Alternates pages and verifies the newly programmed record before returning. */
 int CalibrationStore_Save(const CalibrationStoreData *data,
                           uint32_t *saved_sequence);
+
+/* Whole-image access used by device_config. Load returns 1 if any valid record. */
+int StoreImage_Load(StoreImage *image);
+/* Always writes a v4 record (sequence = newest + 1) and verifies it. */
+int StoreImage_Save(const StoreImage *image, uint32_t *saved_sequence);
 
 #ifdef __cplusplus
 }

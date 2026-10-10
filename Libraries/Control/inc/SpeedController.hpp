@@ -8,6 +8,9 @@ namespace control {
 class SpeedController {
  public:
   void init(float kp, float ki, float iq_limit_a);
+  /* Output ceiling only. Does not clear the speed reference or the integrator
+   * beyond the new limits. Capped at IQ_HARD_MAX_A. */
+  void setIqLimit(float iq_limit_a);
   void reset();
   void setGains(float kp, float ki);
   void setDerivativeGain(float kd);

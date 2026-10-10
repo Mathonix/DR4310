@@ -55,6 +55,8 @@ class MotorIdentifier {
                 const FOCState &foc,
                 float omega_e_rad_s,
                 float bus_v);
+  /* Ident aborts below this bus. Values under 6 V are raised to 6 V. */
+  void SetMinBusV(float min_v);
   const MotorIdStatus &GetStatus() const;
   const control::MotorParams &GetResult() const;
 
@@ -67,6 +69,7 @@ class MotorIdentifier {
                    float omega_e_rad_s);
 
   MotorIdStatus ident_ = {};
+  float min_bus_v_ = 6.0f;
 };
 
 }  // namespace control

@@ -23,6 +23,8 @@
 /* USER CODE BEGIN Includes */
 #include "control_app.h"
 #include "gm6020_can.h"
+#include "device_config.h"
+#include "iq_limits.h"
 #include <string.h>
 
 /* USER CODE END Includes */
@@ -71,6 +73,8 @@ typedef struct
 #define CAN_TEST_DLC            FDCAN_DLC_BYTES_8
 #define CAN_CMD_DISABLE         0x00U
 #define CAN_CMD_CURRENT         0x01U
+/* 0x02 and 0x05 are no longer accepted on the native control ID.
+ * Speed and position are whole frames on their own identifiers. */
 #define CAN_CMD_SPEED           0x02U
 #define CAN_CMD_ESTOP           0x03U
 #define CAN_CMD_SET_PID         0x04U
@@ -78,6 +82,15 @@ typedef struct
 #define CAN_CMD_MIT             0x06U
 #define CAN_CMD_SET_MODE        0x07U
 #define CAN_CMD_SET_AUTO_ENABLE 0x08U
+/* Identifier is the command. Payload is four little-endian uint16 maps. */
+#define CAN_SPEED_CMD_BASE_ID      0x400U
+#define CAN_POSITION_CMD_BASE_ID   0x500U
+#define CAN_SPEED_KP_MAX           10.0f
+#define CAN_SPEED_KI_MAX           5.0f
+#define CAN_SPEED_KD_MAX           1.0f
+#define CAN_POSITION_KP_MAX        200.0f
+#define CAN_POSITION_KI_MAX        100.0f
+#define CAN_POSITION_KD_MAX        100.0f
 #define CAN_PID_CURRENT_KP      0x01U
 #define CAN_PID_CURRENT_KI      0x02U
 #define CAN_PID_CURRENT_LIMIT   0x03U
@@ -92,7 +105,9 @@ typedef struct
 #define CAN_MODE_SPEED          0x02U
 #define CAN_MODE_POSITION       0x03U
 #define CAN_MODE_MIT            0x04U
-#define CAN_CURRENT_LIMIT_A     2.50f
+/* Accept window for a CAN current command. The live clamp is the overload
+ * limiter, which never exceeds this value. MIT packed iq_ff stays MIT_T_*. */
+#define CAN_CURRENT_LIMIT_A     IQ_HARD_MAX_A
 #define CAN_SPEED_LIMIT_RPM     500.0f
 #define CAN_POSITION_LIMIT_RAD  500.0f
 /* Cheetah-style MIT packed ranges (shared with host tools). */
@@ -194,7 +209,8 @@ volatile uint32_t can_test_protocol_error_warning;
 volatile uint32_t can_test_protocol_error_passive;
 volatile uint32_t can_test_tx_error_count;
 volatile uint32_t can_test_rx_error_count;
-const volatile uint8_t can_node_id = MOTOR_CAN_ID;
+/* Compile-time default; replaced at boot by the flash config (UART SET CAN_ID). */
+volatile uint8_t can_node_id = MOTOR_CAN_ID;
 static GM6020_Session gm6020_session;
 static uint32_t gm6020_feedback_tick;
 volatile uint32_t gm6020_rx_count;
@@ -244,6 +260,11 @@ static HAL_StatusTypeDef VOFA_SendJustFloat1(float value);
 static void CAN_ExternalDebugInit(void);
 static void CAN_ExternalDebugUpdate(void);
 static void CAN_ApplyControlFrame(uint32_t id, const uint8_t *data);
+static void CAN_ApplySpeedFrame(const uint8_t *data);
+static void CAN_ApplyPositionFrame(const uint8_t *data);
+static void CAN_YieldGm6020Session(void);
+static uint32_t CAN_NodeId(void);
+static float CAN_UnpackU16(const uint8_t *le, float x_min, float x_max);
 static void CAN_SendStatusFrame(uint8_t mode, uint8_t fault_flags);
 static void CAN_SendGM6020Feedback(void);
 static float CAN_UintToFloat(uint16_t x_int, float x_min, float x_max, uint8_t bits);
@@ -315,6 +336,33 @@ int main(void)
 #elif BOARD_TEST_MODE
   BoardTest_Init();
 #else
+  /* Load persistent config (CAN ID, tunables, boot mode) before CAN init so the
+   * hardware filter is built for the stored ID. */
+  DeviceConfig_Init();
+  can_node_id = DeviceConfig_ActiveCanId();
+  /* MX programs 1 Mbps (prescaler 10, 17 tq at 170 MHz). Re-init only when the
+   * stored CAN_BAUD needs a different prescaler, and only before FDCAN start. */
+  {
+    const uint32_t can_prescaler =
+        DeviceConfig_CanPrescaler(DeviceConfig_Live()->can_baud);
+    if ((can_prescaler != 0U) &&
+        (can_prescaler != hfdcan1.Init.NominalPrescaler))
+    {
+      const uint32_t saved_nominal = hfdcan1.Init.NominalPrescaler;
+      const uint32_t saved_data = hfdcan1.Init.DataPrescaler;
+      hfdcan1.Init.NominalPrescaler = can_prescaler;
+      hfdcan1.Init.DataPrescaler = can_prescaler;
+      if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
+      {
+        /* Stay on the CubeMX 1 Mbps timing. Do not halt: UART must still boot
+         * so the stored baud can be put back with SET CAN_BAUD / SAVE / REBOOT. */
+        hfdcan1.Init.NominalPrescaler = saved_nominal;
+        hfdcan1.Init.DataPrescaler = saved_data;
+        (void)HAL_FDCAN_Init(&hfdcan1);
+        DeviceConfig_NoteCanBaudFallback();
+      }
+    }
+  }
   CAN_ExternalDebugInit();
   ControlApp_Init(&hadc1, &hspi3, &htim1, &huart1);
 #endif
@@ -507,7 +555,7 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.DataSyncJumpWidth = 3;
   hfdcan1.Init.DataTimeSeg1 = 13;
   hfdcan1.Init.DataTimeSeg2 = 3;
-  hfdcan1.Init.StdFiltersNbr = 1;
+  hfdcan1.Init.StdFiltersNbr = 2;
   hfdcan1.Init.ExtFiltersNbr = 0;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
   if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
@@ -1009,17 +1057,43 @@ static void CAN_RecoverIfNeeded(void)
   CAN_UpdateDiagnostics();
 }
 
+static uint32_t CAN_NodeId(void)
+{
+  return (can_node_id == 0U) ? CAN_TEST_ID : (uint32_t)(can_node_id & 0x7FU);
+}
+
+static void CAN_YieldGm6020Session(void)
+{
+  if ((gm6020_session.active) && (ControlApp_GetAutoEnable() == 0U))
+  {
+    ControlApp_Disable();
+  }
+  GM6020_Cancel(&gm6020_session);
+}
+
 static void CAN_ExternalDebugInit(void)
 {
   FDCAN_FilterTypeDef filter = {0};
+  const uint32_t node_id = CAN_NodeId();
 
   filter.IdType = FDCAN_STANDARD_ID;
   filter.FilterIndex = 0;
   filter.FilterType = FDCAN_FILTER_DUAL;
   filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-  filter.FilterID1 = CAN_CONTROL_BASE_ID + ((can_node_id == 0U) ? CAN_TEST_ID : (uint32_t)(can_node_id & 0x7FU));
-  filter.FilterID2 = GM6020_COMMAND_ID;
+  filter.FilterID1 = CAN_CONTROL_BASE_ID + node_id;
+  /* Runtime CAN ID (flash config, UART SET CAN_ID) instead of the MOTOR_CAN_ID macro. */
+  filter.FilterID2 = GM6020_CommandIdFor(node_id);
 
+  can_test_status = HAL_FDCAN_ConfigFilter(&hfdcan1, &filter);
+  if (can_test_status != HAL_OK)
+  {
+    CAN_UpdateDiagnostics();
+    return;
+  }
+
+  filter.FilterIndex = 1;
+  filter.FilterID1 = CAN_SPEED_CMD_BASE_ID + node_id;
+  filter.FilterID2 = CAN_POSITION_CMD_BASE_ID + node_id;
   can_test_status = HAL_FDCAN_ConfigFilter(&hfdcan1, &filter);
   if (can_test_status != HAL_OK)
   {
@@ -1055,6 +1129,9 @@ static void CAN_ExternalDebugUpdate(void)
   uint8_t rx_data[8] = {0};
   uint32_t now = HAL_GetTick();
   const ControlTelemetry_t *control = ControlApp_GetTelemetry();
+  const uint32_t node_id = CAN_NodeId();
+  const uint32_t speed_id = CAN_SPEED_CMD_BASE_ID + node_id;
+  const uint32_t position_id = CAN_POSITION_CMD_BASE_ID + node_id;
   uint8_t mode = CAN_MODE_DISABLED;
   uint8_t rx_budget = 3U;
 
@@ -1089,10 +1166,26 @@ static void CAN_ExternalDebugUpdate(void)
       can_invalid_frame_count++;
       continue;
     }
+    if ((rx_header.Identifier == speed_id) || (rx_header.Identifier == position_id))
+    {
+      ControlApp_NotifyHostActivity(); /* feeds the optional UART TIMEOUT_MS watchdog */
+      CAN_YieldGm6020Session();
+      if (rx_header.Identifier == speed_id)
+      {
+        CAN_ApplySpeedFrame(rx_data);
+      }
+      else
+      {
+        CAN_ApplyPositionFrame(rx_data);
+      }
+      continue;
+    }
+
     float amps = 0.0f;
-    if (GM6020_DecodeCurrent(MOTOR_CAN_ID, rx_header.Identifier, rx_data, 8U, 1U, &amps))
+    if (GM6020_DecodeCurrent(can_node_id, rx_header.Identifier, rx_data, 8U, 1U, &amps))
     {
       gm6020_rx_count++;
+      ControlApp_NotifyHostActivity();
       /* A zero GM6020 current is the protocol's disable command. */
       if ((ControlApp_GetAutoEnable() != 0U) && (amps == 0.0f))
       {
@@ -1118,11 +1211,7 @@ static void CAN_ExternalDebugUpdate(void)
     }
     else
     {
-      if ((gm6020_session.active) && (ControlApp_GetAutoEnable() == 0U))
-      {
-        ControlApp_Disable();
-      }
-      GM6020_Cancel(&gm6020_session);
+      CAN_YieldGm6020Session();
       CAN_ApplyControlFrame(rx_header.Identifier, rx_data);
     }
   }
@@ -1187,7 +1276,7 @@ static void CAN_SendGM6020Feedback(void)
   uint8_t data[8];
   GM6020_PackFeedback(control->angle_deg, control->velocity_rad_s * RAD_S_TO_RPM,
       control->power_stage_armed ? control->iq_a : 0.0f, data);
-  header.Identifier = GM6020_FEEDBACK_ID;
+  header.Identifier = GM6020_FeedbackIdFor(can_node_id);
   header.IdType = FDCAN_STANDARD_ID;
   header.TxFrameType = FDCAN_DATA_FRAME;
   header.DataLength = FDCAN_DLC_BYTES_8;
@@ -1270,6 +1359,60 @@ static void CAN_SendStatusFrame(uint8_t mode, uint8_t fault_flags)
   can_test_tx_count++;
 }
 
+static float CAN_UnpackU16(const uint8_t *le, float x_min, float x_max)
+{
+  const uint16_t raw = (uint16_t)le[0] | ((uint16_t)le[1] << 8);
+  return CAN_UintToFloat(raw, x_min, x_max, 16U);
+}
+
+/*
+ * Speed ID  0x400+id and position ID 0x500+id.
+ * Data, little-endian uint16 linear maps, command is the identifier:
+ *   [0:2] target   [2:4] kp   [4:6] ki   [6:8] kd
+ */
+static void CAN_ApplySpeedFrame(const uint8_t *data)
+{
+  const float rpm = CAN_UnpackU16(data, -CAN_SPEED_LIMIT_RPM, CAN_SPEED_LIMIT_RPM);
+  const float kp = CAN_UnpackU16(&data[2], 0.0f, CAN_SPEED_KP_MAX);
+  const float ki = CAN_UnpackU16(&data[4], 0.0f, CAN_SPEED_KI_MAX);
+  const float kd = CAN_UnpackU16(&data[6], 0.0f, CAN_SPEED_KD_MAX);
+
+  control_speed_pi_kp = kp;
+  control_speed_pi_ki = ki;
+  control_speed_pi_kd = kd;
+  ControlApp_SetMode(CTRL_MODE_SPEED);
+  ControlApp_SetSpeedRef(rpm * RPM_TO_RAD_S);
+  can_control_mode = CAN_MODE_SPEED;
+  can_control_target = rpm;
+  can_control_last_cmd = CAN_CMD_SPEED;
+  can_control_rx_count++;
+}
+
+static void CAN_ApplyPositionFrame(const uint8_t *data)
+{
+  if (ControlApp_PositionEncoderReady() == 0U)
+  {
+    /* Ignore the frame and leave the current mode (IDLE stays IDLE).
+     * SetMode refuses the switch and cancels a deferred boot-into-position. */
+    ControlApp_SetMode(CTRL_MODE_POSITION);
+    return;
+  }
+  const float radians = CAN_UnpackU16(data, -CAN_POSITION_LIMIT_RAD, CAN_POSITION_LIMIT_RAD);
+  const float kp = CAN_UnpackU16(&data[2], 0.0f, CAN_POSITION_KP_MAX);
+  const float ki = CAN_UnpackU16(&data[4], 0.0f, CAN_POSITION_KI_MAX);
+  const float kd = CAN_UnpackU16(&data[6], 0.0f, CAN_POSITION_KD_MAX);
+
+  control_position_kp = kp;
+  control_position_ki = ki;
+  control_position_kd = kd;
+  ControlApp_SetMode(CTRL_MODE_POSITION);
+  ControlApp_SetPositionRef(radians);
+  can_control_mode = CAN_MODE_POSITION;
+  can_control_target = radians;
+  can_control_last_cmd = CAN_CMD_POSITION;
+  can_control_rx_count++;
+}
+
 static float CAN_UintToFloat(uint16_t x_int, float x_min, float x_max, uint8_t bits)
 {
   float span;
@@ -1336,6 +1479,7 @@ static void CAN_ApplyControlFrame(uint32_t id, const uint8_t *data)
   cmd = data[0];
   memcpy(&target, &data[2], sizeof(float));
   can_control_last_cmd = cmd;
+  ControlApp_NotifyHostActivity();
 
   /* Supervisory automatic-enable command. Byte 1 selects the mode. */
   if (cmd == CAN_CMD_SET_AUTO_ENABLE)
@@ -1397,10 +1541,20 @@ static void CAN_ApplyControlFrame(uint32_t id, const uint8_t *data)
           can_control_mode = CAN_MODE_SPEED;
           break;
         case CAN_MODE_POSITION:
+          if (ControlApp_PositionEncoderReady() == 0U)
+          {
+            ControlApp_SetMode(CTRL_MODE_POSITION);
+            break;
+          }
           ControlApp_SetMode(CTRL_MODE_POSITION);
           can_control_mode = CAN_MODE_POSITION;
           break;
         case CAN_MODE_MIT:
+          if (ControlApp_PositionEncoderReady() == 0U)
+          {
+            ControlApp_SetMode(CTRL_MODE_MIT);
+            break;
+          }
           ControlApp_SetMode(CTRL_MODE_MIT);
           can_control_mode = CAN_MODE_MIT;
           break;
@@ -1457,40 +1611,14 @@ static void CAN_ApplyControlFrame(uint32_t id, const uint8_t *data)
       can_control_rx_count++;
       break;
 
-    case CAN_CMD_SPEED:
-      if (target > CAN_SPEED_LIMIT_RPM)
-      {
-        target = CAN_SPEED_LIMIT_RPM;
-      }
-      else if (target < -CAN_SPEED_LIMIT_RPM)
-      {
-        target = -CAN_SPEED_LIMIT_RPM;
-      }
-      ControlApp_SetMode(CTRL_MODE_SPEED);
-      ControlApp_SetSpeedRef(target * RPM_TO_RAD_S);
-      can_control_mode = CAN_MODE_SPEED;
-      can_control_target = target;
-      can_control_rx_count++;
-      break;
-
-    case CAN_CMD_POSITION:
-      if (target > CAN_POSITION_LIMIT_RAD)
-      {
-        target = CAN_POSITION_LIMIT_RAD;
-      }
-      else if (target < -CAN_POSITION_LIMIT_RAD)
-      {
-        target = -CAN_POSITION_LIMIT_RAD;
-      }
-      ControlApp_SetMode(CTRL_MODE_POSITION);
-      ControlApp_SetPositionRef(target);
-      can_control_mode = CAN_MODE_POSITION;
-      can_control_target = target;
-      can_control_rx_count++;
-      break;
-
     case CAN_CMD_MIT:
       /* Enter MIT. Subsequent frames on this ID are pure Cheetah packs. */
+      if (ControlApp_PositionEncoderReady() == 0U)
+      {
+        ControlApp_SetMode(CTRL_MODE_MIT);
+        can_control_rx_count++;
+        break;
+      }
       ControlApp_SetMode(CTRL_MODE_MIT);
       can_control_mode = CAN_MODE_MIT;
       can_control_target = 0.0f;
@@ -1509,10 +1637,20 @@ static void CAN_ApplyControlFrame(uint32_t id, const uint8_t *data)
           can_control_mode = CAN_MODE_SPEED;
           break;
         case CAN_MODE_POSITION:
+          if (ControlApp_PositionEncoderReady() == 0U)
+          {
+            ControlApp_SetMode(CTRL_MODE_POSITION);
+            break;
+          }
           ControlApp_SetMode(CTRL_MODE_POSITION);
           can_control_mode = CAN_MODE_POSITION;
           break;
         case CAN_MODE_MIT:
+          if (ControlApp_PositionEncoderReady() == 0U)
+          {
+            ControlApp_SetMode(CTRL_MODE_MIT);
+            break;
+          }
           ControlApp_SetMode(CTRL_MODE_MIT);
           can_control_mode = CAN_MODE_MIT;
           break;

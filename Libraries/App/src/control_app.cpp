@@ -1,11 +1,14 @@
 #include "control_app.h"
 #include "calibration_store.h"
+#include "ascii_util.h"
+#include "device_config.h"
 
 #include "ControlTiming.hpp"
 #include "CurrentSense.hpp"
 #include "MT6701.hpp"
 #include "HardwareBridge.h"
 #include "FOCController.hpp"
+#include "OverloadLimiter.hpp"
 #include "SpeedController.hpp"
 #include "PositionController.hpp"
 #include "TrajectoryGenerator.hpp"
@@ -27,9 +30,9 @@ namespace app {
 constexpr uint32_t kControlPeriodMs = 1U;
 /* 控制周期 单位s */
 constexpr float kControlDtS = 0.001f;
-/* 电机极对数 */
-constexpr uint8_t kMotorPolePairsU8 = 14U;
-constexpr float kMotorPolePairs = 14.0f;
+/* Live commutation pole count. Copied once from config before the 20 kHz ISR. */
+uint8_t g_active_pole_pairs_u8 = DEVICE_DEFAULT_POLE_PAIRS;
+float g_active_pole_pairs = static_cast<float>(DEVICE_DEFAULT_POLE_PAIRS);
 
 constexpr float kTwoPi = 6.28318530718f;
 constexpr float kPi = 3.14159265359f;
@@ -38,15 +41,17 @@ constexpr uint32_t kFaultEncoder = 0x00000001UL;
 constexpr uint32_t kFaultCurrent = 0x00000002UL;
 constexpr uint32_t kFaultDrv = 0x00000004UL;
 constexpr uint32_t kFaultBusUndervolt = 0x00000008UL;
-/* DRV8313 / FOC need a real bus. 5 V debug supply must NOT enable power stage. */
+/* DRV8313 / FOC need a real bus. 5 V debug supply must NOT enable power stage.
+ * Enable paths use max(this floor, VBUS_MIN). Kept equal to the shared macro. */
 constexpr float kBusMinEnableV = 6.0f;
+static_assert(kBusMinEnableV == DEVICE_VBUS_HARD_MIN_V,
+              "undervoltage floor must match DEVICE_VBUS_HARD_MIN_V");
 /* Require continuous good bus samples before arming FOC after boot/mode entry. */
 constexpr uint16_t kBusOkSettleMs = 50U;
 constexpr float kOpenLoopRampRadS2 = 1000.0f;
 constexpr float kCurrentTestRampAS = 10000.0f;
 constexpr float kSpeedRefRampRadS2 = 10000.0f;
 constexpr float kCurrentLoopOmegaC = 1200.0f;
-constexpr float kIqSoftLimitA = 2.50f;
 constexpr float kRpmToRadS = 0.10471975512f;
 constexpr float kRadSToRpm = 1.0f / kRpmToRadS;
 /* 上电后自动进入速度闭环，并以该转速启动；改这里即可改默认目标转速。 */
@@ -81,9 +86,24 @@ constexpr uint16_t kDrvFaultLowDebounceMs = 5U;
 constexpr uint32_t kCpuClockHz = 170000000U;
 constexpr size_t kVofaFrameValueCount = 16U;
 constexpr size_t kVofaFrameBytes = (kVofaFrameValueCount * sizeof(float)) + 4U;
-constexpr size_t kVofaRingFrames = 4U;
-constexpr size_t kVofaRxRingBytes = 128U;
-constexpr size_t kVofaCommandMaxBytes = 48U;
+/* UART TX is one byte queue shared by JustFloat frames and '@' text replies.
+ * Messages are enqueued whole (all-or-nothing), so a reply can never land in
+ * the middle of a binary frame. Telemetry only uses the low part of the queue
+ * so command replies always find room. */
+constexpr size_t kUartTxQueueBytes = 1024U;
+constexpr size_t kUartTxTelemetryHighWater = 3U * kVofaFrameBytes;
+constexpr size_t kUartTxChunkBytes = 128U;
+constexpr size_t kVofaRxRingBytes = 256U;
+/* TCH carries 16 channel names. 191 payload characters plus the terminator. */
+constexpr size_t kVofaCommandMaxBytes = 192U;
+constexpr size_t kUartMaxTokens = 20U;
+constexpr uint32_t kRebootDrainTimeoutMs = 300U;
+constexpr float kUartSpeedLimitRpm = 500.0f;
+constexpr float kUartPositionLimitRad = 500.0f;
+constexpr float kMitPMax = 50.0f;
+constexpr float kMitVMax = 50.0f;
+constexpr float kMitKpMax = 500.0f;
+constexpr float kMitKdMax = 5.0f;
 constexpr float kVofaCurrentKpMax = 20.0f;
 constexpr float kVofaCurrentKiMax = 2500.0f;
 constexpr float kCalibAlignVoltageV = 1.20f;
@@ -116,11 +136,12 @@ enum class CalibState : uint8_t {
   kFail,
 };
 
-std::array<uint8_t, kVofaFrameBytes * kVofaRingFrames> g_vofa_ring = {};
-std::array<uint8_t, kVofaFrameBytes> g_vofa_tx_frame = {};
-uint16_t g_vofa_head = 0U;
-uint16_t g_vofa_tail = 0U;
+std::array<uint8_t, kUartTxQueueBytes> g_uart_txq = {};
+std::array<uint8_t, kUartTxChunkBytes> g_uart_tx_chunk = {};
+size_t g_uart_txq_head = 0U; /* write index (main loop only) */
+size_t g_uart_txq_tail = 0U; /* read index (main loop only) */
 volatile uint8_t g_vofa_tx_busy = 0U;
+volatile uint32_t g_uart_tx_drop_count = 0U;
 UART_HandleTypeDef *g_vofa_uart = nullptr;
 uint8_t g_vofa_rx_byte = 0U;
 std::array<uint8_t, kVofaRxRingBytes> g_vofa_rx_ring = {};
@@ -152,22 +173,48 @@ void VofaStartReceive(UART_HandleTypeDef *uart) {
   }
 }
 
+size_t UartTxUsed() {
+  return (g_uart_txq_head + kUartTxQueueBytes - g_uart_txq_tail) %
+         kUartTxQueueBytes;
+}
+
+bool UartTxIdle() {
+  return (g_vofa_tx_busy == 0U) && (UartTxUsed() == 0U);
+}
+
+/* All-or-nothing enqueue. limit = max queue fill allowed after the write. */
+bool UartTxEnqueue(const uint8_t *data, size_t len, size_t limit) {
+  if (limit > (kUartTxQueueBytes - 1U)) {
+    limit = kUartTxQueueBytes - 1U;
+  }
+  if ((data == nullptr) || ((UartTxUsed() + len) > limit)) {
+    g_uart_tx_drop_count++;
+    return false;
+  }
+  for (size_t i = 0U; i < len; ++i) {
+    g_uart_txq[g_uart_txq_head] = data[i];
+    g_uart_txq_head = (g_uart_txq_head + 1U) % kUartTxQueueBytes;
+  }
+  return true;
+}
+
 void VofaPump(UART_HandleTypeDef *uart) {
-  if ((uart == nullptr) || (g_vofa_tx_busy != 0U) ||
-      (g_vofa_head == g_vofa_tail)) {
+  if ((uart == nullptr) || (g_vofa_tx_busy != 0U)) {
     return;
   }
-
-  std::memcpy(g_vofa_tx_frame.data(),
-              &g_vofa_ring[g_vofa_tail * kVofaFrameBytes],
-              kVofaFrameBytes);
-  g_vofa_tail = static_cast<uint16_t>((g_vofa_tail + 1U) %
-                                      kVofaRingFrames);
+  size_t n = 0U;
+  while ((n < kUartTxChunkBytes) && (g_uart_txq_tail != g_uart_txq_head)) {
+    g_uart_tx_chunk[n++] = g_uart_txq[g_uart_txq_tail];
+    g_uart_txq_tail = (g_uart_txq_tail + 1U) % kUartTxQueueBytes;
+  }
+  if (n == 0U) {
+    return;
+  }
   g_vofa_tx_busy = 1U;
-  if (HAL_UART_Transmit_IT(uart, g_vofa_tx_frame.data(),
-                           static_cast<uint16_t>(g_vofa_tx_frame.size())) !=
-      HAL_OK) {
+  if (HAL_UART_Transmit_IT(uart, g_uart_tx_chunk.data(),
+                           static_cast<uint16_t>(n)) != HAL_OK) {
     g_vofa_tx_busy = 0U;
+    g_uart_tx_drop_count++;
   }
 }
 
@@ -207,7 +254,12 @@ volatile float control_current_pi_kp = 12.0f;
 volatile float control_current_pi_ki = 1500.0f;
 volatile float control_current_pi_out_limit_v = 0.0f;
 volatile float control_current_pi_kaw = 0.5f;
-volatile float control_iq_limit_a = 2.50f;
+volatile float control_iq_limit_a = IQ_CONTINUOUS_MAX_A;
+/* Overload defaults: off, ceiling equal to the continuous limit, 2 s budget.
+ * DeviceConfig_Init captures these into the v1/default image. */
+volatile float control_ol_en = 0.0f;
+volatile float control_ol_iq_a = IQ_CONTINUOUS_MAX_A;
+volatile float control_ol_time_s = OL_TIME_DEFAULT_S;
 /* 速度环默认 Kp/Ki；上电会使用这里，也可通过 RAM 实时修改。 */
 volatile float control_speed_pi_kp = 0.25f;
 volatile float control_speed_pi_ki = 0.02f;
@@ -215,6 +267,11 @@ volatile float control_speed_pi_kd = 0.0f;
 volatile float control_accel_ref_rad_s2 = 0.0f;
 volatile float control_electrical_zero_rad = app::kDefaultElectricalZeroRad;
 volatile uint8_t control_encoder_direction = app::kDefaultEncoderDirection;
+volatile float control_vbus_min_v = DEVICE_DEFAULT_VBUS_MIN_V;
+volatile float control_vbus_max_v = DEVICE_DEFAULT_VBUS_MAX_V;
+volatile float control_zero_offset_rad = 0.0f;
+volatile float control_rs_ohm = DEVICE_DEFAULT_RS_OHM;
+volatile float control_ls_h = DEVICE_DEFAULT_LS_H;
 volatile float control_max_modulation = 0.90f;
 volatile uint8_t control_decoupling_enable = 0U;
 
@@ -238,6 +295,7 @@ class ApplicationController {
             UART_HandleTypeDef *huart_debug);
   void Update();
   void SetMode(uint8_t mode);
+  bool PositionEncoderReady() const;
   void SetAutoEnable(uint8_t enable);
   uint8_t GetAutoEnable() const;
   void SetCurrentRef(float iq_ref_a);
@@ -269,9 +327,45 @@ class ApplicationController {
   void ProcessVofaCommands();
   void ExecuteVofaCommand(char *line);
   void SendVofaDebug();
+  bool Reply(const TextBuf &text);
+  void ReplyOk(const char *cmd, const char *detail = nullptr);
+  void ReplyErr(const char *cmd, const char *reason);
+  bool ReplyParam(size_t index);
+  void ServiceGetStream();
+  void ReplyInfo();
+  void ReplyFault();
+  void ReplyTlist();
+  void ReplyTch();
+  bool IsMotorIdle() const;
+  void ApplyBootMode();
+  void CheckHostTimeout(uint32_t now);
+  void ServiceReboot(uint32_t now);
+  void ResyncAfterFlashStall();
+
+ public:
+  void NotifyHostActivity();
+
+ private:
   void UpdateUnwrappedPosition();
+  float FeedbackPosition() const;
+  void ServiceZeroAnchor();
+  void ApplyBootCommutation();
+  void ApplyMotorModelIfChanged();
   uint8_t ResolveControlMode() const;
   void OnModeEnter(uint8_t new_mode, uint8_t prev_mode);
+
+  struct CmdRamp {
+    float start;
+    float applied;
+    float last_cmd;
+    uint16_t last_ms;
+    uint16_t elapsed_ms;
+  };
+  void SyncCmdRampIdle(CmdRamp &ramp, float applied, float command);
+  float StepCmdRamp(CmdRamp &ramp, float command, uint16_t dur_ms, float max_step);
+  void NoteFault(safety::Fault fault);
+  void BusWindow(float *min_v, float *max_v) const;
+  float TelemValue(uint8_t index, const control::FOCState &foc) const;
 
   UART_HandleTypeDef *debug_uart_ = nullptr;
   TIM_HandleTypeDef *pwm_timer_ = nullptr;
@@ -301,6 +395,9 @@ class ApplicationController {
   float applied_current_pi_out_limit_v_ = 0.0f;
   float applied_current_pi_kaw_ = 0.5f;
   float applied_iq_limit_a_ = 0.0f;
+  /* -1 forces the first 1 kHz tick to publish the speed-loop ceiling. */
+  float applied_speed_ceiling_a_ = -1.0f;
+  control::OverloadLimiter overload_{};
   float applied_speed_pi_kp_ = 0.10f;
   float applied_speed_pi_ki_ = 0.02f;
   float applied_speed_pi_kd_ = 0.0f;
@@ -358,6 +455,34 @@ class ApplicationController {
   uint32_t last_vofa_tick_ = 0U;
   std::array<char, kVofaCommandMaxBytes> vofa_command_line_ = {};
   size_t vofa_command_length_ = 0U;
+  uint8_t vofa_line_overflow_ = 0U;
+  uint32_t last_host_cmd_tick_ = 0U;
+  uint8_t host_seen_ = 0U;
+  uint32_t host_timeout_trip_count_ = 0U;
+  uint8_t reboot_pending_ = 0U;
+  uint32_t reboot_request_tick_ = 0U;
+  int32_t get_stream_index_ = -1; /* GET-all streaming cursor, -1 = idle */
+  CmdRamp spd_ramp_ = {};
+  CmdRamp pos_ramp_ = {};
+  CmdRamp cur_ramp_ = {};
+  uint8_t pos_ramp_timed_ = 0U;
+  float applied_rs_ohm_ = DEVICE_DEFAULT_RS_OHM;
+  float applied_ls_h_ = DEVICE_DEFAULT_LS_H;
+  uint8_t zero_anchor_ready_ = 0U;
+  float zero_anchor_unwrapped_ = 0.0f;
+  float applied_zero_offset_ = 0.0f;
+  uint8_t boot_position_pending_ = 0U;
+  uint8_t boot_auto_enable_pending_ = 0U;
+  uint8_t position_align_on_ready_ = 0U;
+  uint8_t mit_align_on_ready_ = 0U;
+  uint8_t fault_snap_valid_ = 0U;
+  uint32_t fault_snap_tick_ = 0U;
+  uint32_t fault_snap_word_ = 0U;
+  float fault_snap_pos_ = 0.0f;
+  float fault_snap_omega_ = 0.0f;
+  float fault_snap_iq_ = 0.0f;
+  float fault_snap_vbus_ = 0.0f;
+  uint8_t fault_snap_mode_ = 0U;
 };
 
 float ApplicationController::Wrap0To2Pi(float angle) {
@@ -411,7 +536,7 @@ float ApplicationController::ComputeElectricalAngle(float encoder_angle_rad) con
           encoder_angle_rad,
           control_encoder_direction == 0U,
           control_electrical_zero_rad);
-  return control::Wrap0To2Pi(mech_cal * kMotorPolePairs);
+  return control::Wrap0To2Pi(mech_cal * g_active_pole_pairs);
 }
 
 void ApplicationController::CalibReset() {
@@ -538,12 +663,12 @@ void ApplicationController::CalibStep(float encoder_angle_rad) {
       calib_sample_count_++;
       if (calib_sample_count_ >= kCalibSampleMs) {
         calib_pair_index_++;
-        if (calib_pair_index_ >= kMotorPolePairsU8) {
+        if (calib_pair_index_ >= g_active_pole_pairs_u8) {
           const float mean_offset =
               calib_zero_sum_ /
-              (kMotorPolePairs * static_cast<float>(kCalibSampleMs));
+              (g_active_pole_pairs * static_cast<float>(kCalibSampleMs));
           control_electrical_zero_rad =
-              mean_offset - (kPi * (kMotorPolePairs - 1.0f) / kMotorPolePairs);
+              mean_offset - (kPi * (g_active_pole_pairs - 1.0f) / g_active_pole_pairs);
           control_electrical_zero_rad = Wrap0To2Pi(control_electrical_zero_rad);
           calib_voltage_cmd_ = 0.0f;
           calib_state_ = CalibState::kDone;
@@ -591,13 +716,48 @@ void ApplicationController::ClearFaults() {
   drv_fault_low_ms_ = 0U;
 }
 
+/* Latch `fault` and, the first time that bit sets, copy a short snapshot
+ * before any later Disable() changes mode or current. */
+void ApplicationController::NoteFault(safety::Fault fault) {
+  const uint32_t bit = static_cast<uint32_t>(fault);
+  const uint32_t before = fault_manager_.latchedFaults();
+  fault_manager_.setFault(fault);
+  if ((before & bit) != 0U) {
+    return;
+  }
+  /* Same site as the new latch, before Disable() changes mode or current.
+   * The 20 kHz ISR only raises a trip counter and leaves iq/bus in FOCState. */
+  const auto &foc = foc_.GetState();
+  fault_snap_valid_ = 1U;
+  fault_snap_tick_ = HAL_GetTick();
+  fault_snap_word_ = fault_manager_.latchedFaults() & 0xFFFFU;
+  fault_snap_pos_ = FeedbackPosition();
+  fault_snap_omega_ = speed_feedback_estimator_.state().velocity_rad_s;
+  fault_snap_iq_ = foc.iq_a;
+  fault_snap_vbus_ = foc.bus_v;
+  fault_snap_mode_ = last_control_mode_;
+}
+
+void ApplicationController::BusWindow(float *min_v, float *max_v) const {
+  float bus_max = control_vbus_max_v;
+  if (!(bus_max <= DEVICE_VBUS_HARD_MAX_V)) {
+    bus_max = DEVICE_VBUS_HARD_MAX_V;
+  }
+  *min_v = DeviceConfig_EffectiveVbusMin(control_vbus_min_v);
+  *max_v = bus_max;
+}
+
 /*
- * Gate FOC/DRV: bus must stay above BUS_MIN_ENABLE_V for BUS_OK_SETTLE_MS.
- * Prevents boot-time arming on stale/zero ADC or 5 V debug supply.
+ * Gate FOC/DRV: bus must stay inside [max(6 V, VBUS_MIN), VBUS_MAX] for
+ * kBusOkSettleMs. VBUS_MAX cannot be configured above the 40 V board gate.
+ * A 5 V debug supply still cannot arm the stage.
  */
 uint8_t ApplicationController::UpdatePowerStageArm(float bus_v) {
   const auto &health = current_sense_.health();
-  const bool bus_ok = (bus_v >= kBusMinEnableV) && (bus_v <= 40.0f);
+  float bus_min = 0.0f;
+  float bus_max = 0.0f;
+  BusWindow(&bus_min, &bus_max);
+  const bool bus_ok = (bus_v >= bus_min) && (bus_v <= bus_max);
   const bool drv_ok =
       HAL_GPIO_ReadPin(DRV_nFAULT_GPIO_Port, DRV_nFAULT_Pin) != GPIO_PIN_RESET;
   const bool encoder_ok =
@@ -629,15 +789,127 @@ uint8_t ApplicationController::UpdatePowerStageArm(float bus_v) {
   return power_stage_armed_;
 }
 
+void ApplicationController::SyncCmdRampIdle(CmdRamp &ramp,
+                                            float applied,
+                                            float command) {
+  ramp.start = applied;
+  ramp.applied = applied;
+  ramp.last_cmd = command;
+  ramp.last_ms = 0U;
+  ramp.elapsed_ms = 0U;
+}
+
+float ApplicationController::StepCmdRamp(CmdRamp &ramp,
+                                         float command,
+                                         uint16_t dur_ms,
+                                         float max_step) {
+  if ((command != ramp.last_cmd) || (dur_ms != ramp.last_ms)) {
+    ramp.start = ramp.applied;
+    ramp.last_cmd = command;
+    ramp.last_ms = dur_ms;
+    ramp.elapsed_ms = 0U;
+  }
+  float timed = command;
+  if ((dur_ms != 0U) && (ramp.elapsed_ms < dur_ms)) {
+    const uint16_t next = static_cast<uint16_t>(ramp.elapsed_ms + 1U);
+    ramp.elapsed_ms = (next > dur_ms) ? dur_ms : next;
+    const float scale =
+        static_cast<float>(ramp.elapsed_ms) / static_cast<float>(dur_ms);
+    timed = ramp.start + ((command - ramp.start) * scale);
+  }
+  /* Timed ramp and the legacy per-step slew both apply. The slower one wins,
+   * including after the timer has already elapsed. */
+  ramp.applied = DeviceConfig_SlewToward(ramp.applied, timed, max_step);
+  return ramp.applied;
+}
+
+float ApplicationController::FeedbackPosition() const {
+  if ((DeviceConfig_ZeroIsSet() == 0U) || (zero_anchor_ready_ == 0U)) {
+    return position_unwrapped_rad_;
+  }
+  return position_unwrapped_rad_ - zero_anchor_unwrapped_;
+}
+
+void ApplicationController::ServiceZeroAnchor() {
+  if (DeviceConfig_ZeroIsSet() == 0U) {
+    zero_anchor_ready_ = 0U;
+    return;
+  }
+  if ((encoder_valid_ == 0U) || (position_inited_ == 0U)) {
+    return;
+  }
+  if ((zero_anchor_ready_ != 0U) &&
+      (control_zero_offset_rad == applied_zero_offset_)) {
+    return;
+  }
+  /* ZERO_OFFSET is one encoder turn. The estimator starts each boot at the
+   * single-turn canonical angle, so the first reported position is
+   * wrap_±π(single_turn − offset) and does not jump by a whole turn.
+   * Turns accumulated while powered off are gone: the encoder is single-turn.
+   * GEAR_RATIO is not applied here. */
+  const float reported = WrapPmPi(Wrap0To2Pi(position_unwrapped_rad_) -
+                                  Wrap0To2Pi(control_zero_offset_rad));
+  zero_anchor_unwrapped_ = position_unwrapped_rad_ - reported;
+  applied_zero_offset_ = control_zero_offset_rad;
+  zero_anchor_ready_ = 1U;
+}
+
+void ApplicationController::ApplyBootCommutation() {
+  const DeviceConfigData *cfg = DeviceConfig_Live();
+  uint8_t pairs = cfg->pole_pairs;
+  if ((pairs < 1U) || (pairs > 40U)) {
+    pairs = DEVICE_DEFAULT_POLE_PAIRS;
+  }
+  g_active_pole_pairs_u8 = pairs;
+  g_active_pole_pairs = static_cast<float>(pairs);
+
+  control_encoder_direction = kDefaultEncoderDirection;
+  control_electrical_zero_rad = kDefaultElectricalZeroRad;
+  CalibrationStoreData stored = {};
+  if (CalibrationStore_Load(&stored) != 0) {
+    control_encoder_direction = stored.encoder_direction;
+    control_electrical_zero_rad = stored.electrical_zero_rad;
+    calibration_flash_sequence = stored.sequence;
+    calibration_flash_valid = 1U;
+    calibration_flash_status = 1U;
+  }
+  /* A valid stored ENC_DIR replaces both the compile-time constant and the
+   * direction saved inside the calibration record. An invalid or missing
+   * config must not override a calibration that just loaded. */
+  const DeviceConfigSource src = DeviceConfig_Source();
+  if ((src != DEVCFG_SRC_INVALID) && (src != DEVCFG_SRC_DEFAULT)) {
+    control_encoder_direction = cfg->enc_dir;
+  }
+}
+
+void ApplicationController::ApplyMotorModelIfChanged() {
+  if ((control_rs_ohm == applied_rs_ohm_) && (control_ls_h == applied_ls_h_)) {
+    return;
+  }
+  applied_rs_ohm_ = control_rs_ohm;
+  applied_ls_h_ = control_ls_h;
+  control::MotorParams params = foc_.GetMotorParams();
+  params.rs_ohm = applied_rs_ohm_;
+  params.ld_h = applied_ls_h_;
+  params.lq_h = applied_ls_h_;
+  params.pole_pairs = g_active_pole_pairs;
+  foc_.SetMotorParams(params);
+}
+
 void ApplicationController::ResetOuterLoopRamps() {
+  const float position_fb = FeedbackPosition();
   speed_controller_.reset();
   position_controller_.reset();
-  trajectory_.reset(position_unwrapped_rad_);
+  trajectory_.reset(position_fb);
   speed_ref_applied_rad_s_ = 0.0f;
   active_velocity_ref_rad_s_ = 0.0f;
-  active_position_ref_rad_ = position_unwrapped_rad_;
+  active_position_ref_rad_ = position_fb;
   active_accel_ref_rad_s2_ = 0.0f;
   current_test_iq_ref_a_ = 0.0f;
+  SyncCmdRampIdle(spd_ramp_, 0.0f, 0.0f);
+  SyncCmdRampIdle(cur_ramp_, 0.0f, 0.0f);
+  SyncCmdRampIdle(pos_ramp_, position_fb, position_fb);
+  pos_ramp_timed_ = 0U;
 }
 
 void ApplicationController::SetAutoEnable(uint8_t enable) {
@@ -658,7 +930,22 @@ uint8_t ApplicationController::GetAutoEnable() const {
   return control_auto_enable;
 }
 
+bool ApplicationController::PositionEncoderReady() const {
+  return (encoder_valid_ != 0U) && (position_inited_ != 0U);
+}
+
 void ApplicationController::SetMode(uint8_t mode) {
+  if (((mode == kModePosition) || (mode == kModeMit)) &&
+      !PositionEncoderReady()) {
+    /* Do not enter on a stale position target. Also drop a deferred
+     * boot-into-position so it cannot start after this refusal. */
+    boot_position_pending_ = 0U;
+    boot_auto_enable_pending_ = 0U;
+    return;
+  }
+  /* Any accepted mode change, including position, owns the boot request. */
+  boot_position_pending_ = 0U;
+  boot_auto_enable_pending_ = 0U;
   ClearLegacyModeFlags();
 
   switch (mode) {
@@ -762,19 +1049,40 @@ void ApplicationController::OnModeEnter(uint8_t new_mode, uint8_t prev_mode) {
     CalibReset();
   }
 
-  if ((new_mode == kModePosition) && (position_inited_ != 0U)) {
+  if (new_mode == kModePosition) {
+    /* ResetOuterLoopRamps() clears the trajectory target. Put the pending
+     * command back so the first POS/CAN target is not dropped. Targets are
+     * in the same frame as FeedbackPosition(). Without a pending command and
+     * without a position fix, do not arm the previous target. */
+    position_align_on_ready_ = 0U;
     if (position_ref_pending_ == 0U) {
-      control_position_target_rad = position_unwrapped_rad_;
+      if (position_inited_ != 0U) {
+        control_position_target_rad = FeedbackPosition();
+      } else {
+        position_align_on_ready_ = 1U;
+      }
+    }
+    if (position_align_on_ready_ == 0U) {
+      trajectory_.setTarget(control_position_target_rad);
     }
     position_ref_pending_ = 0U;
+  } else {
+    position_align_on_ready_ = 0U;
   }
-  if ((new_mode == kModeMit) && (position_inited_ != 0U)) {
+  if (new_mode == kModeMit) {
+    mit_align_on_ready_ = 0U;
     if (mit_cmd_pending_ == 0U) {
-      control_mit_pos_rad = position_unwrapped_rad_;
-      control_mit_vel_rad_s = 0.0f;
-      control_mit_iq_ff_a = 0.0f;
+      if (position_inited_ != 0U) {
+        control_mit_pos_rad = FeedbackPosition();
+        control_mit_vel_rad_s = 0.0f;
+        control_mit_iq_ff_a = 0.0f;
+      } else {
+        mit_align_on_ready_ = 1U;
+      }
     }
     mit_cmd_pending_ = 0U;
+  } else {
+    mit_align_on_ready_ = 0U;
   }
 
   if (new_mode != kModeIdent) {
@@ -835,7 +1143,7 @@ void ApplicationController::UpdateRotorInFocIsr(uint32_t now_cycles) {
       control::ElectricalAngleFromCanonicalMechanical(
           theta_mech,
           control_electrical_zero_rad,
-          kMotorPolePairs);
+          g_active_pole_pairs);
   foc_.SetDirectElectricalAngle(theta_e);
 }
 
@@ -863,6 +1171,9 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
   speed_controller_.init(control_speed_pi_kp,
                          control_speed_pi_ki,
                          control_iq_limit_a);
+  /* Until the first 1 kHz tick the published clamp is the continuous limit.
+   * The overload limiter steps in Update, not here and not in the ISR. */
+  applied_speed_ceiling_a_ = control_iq_limit_a;
   speed_controller_.setDerivativeGain(control_speed_pi_kd);
   applied_speed_pi_kd_ = control_speed_pi_kd;
   position_controller_.init(control_position_kp,
@@ -895,14 +1206,20 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
   foc_.SetMaxModulation(applied_max_modulation_);
   foc_.SetDecouplingEnable(applied_decoupling_enable_);
 
+  ApplyBootCommutation();
   control::MotorParams params;
   control::motor_params::setDefaults(params);
-  params.pole_pairs = kMotorPolePairs;
+  params.pole_pairs = g_active_pole_pairs;
+  params.rs_ohm = control_rs_ohm;
+  params.ld_h = control_ls_h;
+  params.lq_h = control_ls_h;
   foc_.SetMotorParams(params);
+  applied_rs_ohm_ = control_rs_ohm;
+  applied_ls_h_ = control_ls_h;
 
   HAL_GPIO_WritePin(DRV_ENABLE_GPIO_Port, DRV_ENABLE_Pin, GPIO_PIN_RESET);
   if (current_sense_.calibrate(128U) != HAL_OK) {
-    fault_manager_.setFault(safety::Fault::CurrentSense);
+    NoteFault(safety::Fault::CurrentSense);
   }
 
   (void)HAL_TIM_PWM_Start(htim_pwm, TIM_CHANNEL_1);
@@ -911,7 +1228,7 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
   (void)HAL_TIM_PWM_Start(htim_pwm, TIM_CHANNEL_4);
   current_sense_.setSampleCallback(OnCurrentSample, this);
   if (current_sense_.startHw() != HAL_OK) {
-    fault_manager_.setFault(safety::Fault::CurrentSense);
+    NoteFault(safety::Fault::CurrentSense);
   }
 
   control_mode_cmd = kModeIdle;
@@ -920,16 +1237,6 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
   control_open_loop_enable = 0U;
   control_velocity_ref_rad_s = 0.0f;
   control_current_test_iq_ref_a = 0.0f;
-  control_encoder_direction = kDefaultEncoderDirection;
-  control_electrical_zero_rad = kDefaultElectricalZeroRad;
-  CalibrationStoreData stored_calibration = {};
-  if (CalibrationStore_Load(&stored_calibration) != 0) {
-    control_encoder_direction = stored_calibration.encoder_direction;
-    control_electrical_zero_rad = stored_calibration.electrical_zero_rad;
-    calibration_flash_sequence = stored_calibration.sequence;
-    calibration_flash_valid = 1U;
-    calibration_flash_status = 1U; /* Loaded a valid persisted record. */
-  }
   CalibReset();
   ResetOuterLoopRamps();
   bus_ok_ms_ = 0U;
@@ -938,11 +1245,21 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
   last_control_mode_ = kModeIdle; /* force on_mode_enter on first tick */
   last_control_tick_ = HAL_GetTick();
   VofaStartReceive(debug_uart_);
+  if (DeviceConfig_CanBaudFallback() != 0U) {
+    char buf[64];
+    TextBuf t;
+    Text_Init(&t, buf, sizeof(buf));
+    Text_Str(&t, "@EVT CAN_BAUD fallback live=");
+    Text_U32(&t, DEVICE_DEFAULT_CAN_BAUD);
+    Text_Char(&t, '\n');
+    Reply(t);
+  }
+  ApplyBootMode();
 }
 
 void ApplicationController::SetCurrentRef(float iq_ref_a) {
   control_current_test_iq_ref_a =
-      Clamp(iq_ref_a, -kIqSoftLimitA, kIqSoftLimitA);
+      Clamp(iq_ref_a, -IQ_HARD_MAX_A, IQ_HARD_MAX_A);
 }
 
 void ApplicationController::SetSpeedRef(float velocity_ref_rad_s) {
@@ -971,7 +1288,7 @@ void ApplicationController::SetMitCommand(float pos_rad,
   control_mit_kp = kp < 0.0f ? 0.0f : kp;
   control_mit_kd = kd < 0.0f ? 0.0f : kd;
   control_mit_iq_ff_a =
-      Clamp(iq_ff_a, -kIqSoftLimitA, kIqSoftLimitA);
+      Clamp(iq_ff_a, -IQ_HARD_MAX_A, IQ_HARD_MAX_A);
   mit_cmd_pending_ = 1U;
 }
 
@@ -991,6 +1308,10 @@ void ApplicationController::ApplyIdentResultIfReady() {
   }
 
   foc_.SetMotorParams(identifier_.GetResult());
+  control_rs_ohm = identifier_.GetResult().rs_ohm;
+  control_ls_h = identifier_.GetResult().ld_h;
+  applied_rs_ohm_ = control_rs_ohm;
+  applied_ls_h_ = control_ls_h;
   float kp = 0.0f;
   float ki = 0.0f;
   (void)control::motor_params::getCurrentPi(identifier_.GetResult(),
@@ -1011,86 +1332,700 @@ void ApplicationController::ApplyIdentResultIfReady() {
   control_mode_cmd = kModeIdle;
 }
 
+namespace {
+
+constexpr const char *kFirmwareName = "DR4310";
+constexpr const char *kFirmwareVersion = "3.1.0";
+
+/* Index order is the default VOFA map. Slots 0..15 stay the historical frame.
+ * 28 OlBudget is optional; the default 16-channel map does not include it.
+ * 25 IqLimit stays the continuous IQ_LIM, not the live overload clamp. */
+const char *const kTelemNames[DEVICE_TELEM_CHANNEL_COUNT] = {
+    "IdRef", "Id",     "IqRef", "Iq",      "VdUnsat", "VqUnsat", "VdSat",
+    "VqSat", "Vbus",   "Vsat",  "Omega",   "DutyA",   "DutyB",   "DutyC",
+    "CurKp", "CurKi",  "Ia",    "Ib",      "Ic",      "Vd",      "Vq",
+    "Rpm",   "PosRad", "ElecAngle", "Power", "IqLimit", "Fault", "Mode",
+    "OlBudget"};
+
+control::OverloadConfig OverloadConfigFromParams() {
+  control::OverloadConfig cfg;
+  cfg.iq_limit_a = control_iq_limit_a;
+  cfg.ol_iq_a = control_ol_iq_a;
+  cfg.ol_time_s = control_ol_time_s;
+  cfg.ol_enable = (control_ol_en != 0.0f) ? 1U : 0U;
+  return cfg;
+}
+
+bool TelemNameMatch(const char *canon, const char *upper) {
+  if ((canon == nullptr) || (upper == nullptr)) {
+    return false;
+  }
+  while (*canon != '\0') {
+    char c = *canon;
+    if ((c >= 'a') && (c <= 'z')) {
+      c = static_cast<char>(c - ('a' - 'A'));
+    }
+    if (c != *upper) {
+      return false;
+    }
+    ++canon;
+    ++upper;
+  }
+  return *upper == '\0';
+}
+
+int FindTelemChannel(const char *upper) {
+  for (size_t i = 0U; i < DEVICE_TELEM_CHANNEL_COUNT; ++i) {
+    if (TelemNameMatch(kTelemNames[i], upper)) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+const char *ModeName(uint8_t mode) {
+  switch (mode) {
+    case kModeIdle: return "IDLE";
+    case kModeCurrent: return "CURRENT";
+    case kModeSpeed: return "SPEED";
+    case kModePosition: return "POSITION";
+    case kModeMit: return "MIT";
+    case kModeAlign: return "ALIGN";
+    case kModeOpenLoop: return "OPENLOOP";
+    case kModeIdent: return "IDENT";
+    case kModeCalibrate: return "CALIBRATE";
+    default: return "?";
+  }
+}
+
+int ParseModeToken(const char *tok) {
+  float v = 0.0f;
+  if (Ascii_ParseFloat(tok, &v)) {
+    const int m = static_cast<int>(v);
+    return ((static_cast<float>(m) == v) && (m >= 0) && (m <= 4)) ? m : -1;
+  }
+  if ((std::strcmp(tok, "IDLE") == 0) || (std::strcmp(tok, "DISABLE") == 0)) return kModeIdle;
+  if (std::strcmp(tok, "CURRENT") == 0) return kModeCurrent;
+  if (std::strcmp(tok, "SPEED") == 0) return kModeSpeed;
+  if (std::strcmp(tok, "POSITION") == 0) return kModePosition;
+  if (std::strcmp(tok, "MIT") == 0) return kModeMit;
+  return -1;
+}
+
+}  // namespace
+
+bool ApplicationController::Reply(const TextBuf &text) {
+  if (text.len == 0U) {
+    return true;
+  }
+  /* Replies may use the whole queue; telemetry is capped lower. */
+  return UartTxEnqueue(reinterpret_cast<const uint8_t *>(text.buf), text.len,
+                       kUartTxQueueBytes - 1U);
+}
+
+void ApplicationController::ReplyOk(const char *cmd, const char *detail) {
+  char buf[192];
+  TextBuf t;
+  Text_Init(&t, buf, sizeof(buf));
+  Text_Str(&t, "@OK ");
+  Text_Str(&t, cmd);
+  if ((detail != nullptr) && (*detail != '\0')) {
+    Text_Char(&t, ' ');
+    Text_Str(&t, detail);
+  }
+  Text_Char(&t, '\n');
+  Reply(t);
+}
+
+void ApplicationController::ReplyErr(const char *cmd, const char *reason) {
+  char buf[192];
+  TextBuf t;
+  Text_Init(&t, buf, sizeof(buf));
+  Text_Str(&t, "@ERR ");
+  Text_Str(&t, cmd);
+  Text_Char(&t, ' ');
+  Text_Str(&t, reason);
+  Text_Char(&t, '\n');
+  Reply(t);
+}
+
+bool ApplicationController::ReplyParam(size_t index) {
+  const DeviceParamInfo *info = DeviceConfig_ParamInfo(index);
+  if (info == nullptr) {
+    return true;
+  }
+  char buf[160];
+  TextBuf t;
+  Text_Init(&t, buf, sizeof(buf));
+  Text_Str(&t, "@P ");
+  Text_Str(&t, info->key);
+  Text_Char(&t, '=');
+  Text_Float(&t, DeviceConfig_GetParam(index));
+  Text_Str(&t, " min=");
+  Text_Float(&t, info->min);
+  Text_Str(&t, " max=");
+  Text_Float(&t, info->max);
+  if (info->reboot_required != 0U) {
+    Text_Str(&t, " reboot=1");
+  }
+  if ((info->choices != nullptr) && (info->choices[0] != '\0')) {
+    Text_Str(&t, " choices=");
+    Text_Str(&t, info->choices);
+  }
+  Text_Char(&t, '\n');
+  /* Never drop a parameter line silently: wait for free space instead. */
+  if ((UartTxUsed() + t.len) > (kUartTxQueueBytes - 1U)) {
+    return false;
+  }
+  return Reply(t);
+}
+
+/* GET without a key streams all parameters from Update(): the full list is
+ * larger than the TX queue, so lines are emitted as space frees up. */
+void ApplicationController::ServiceGetStream() {
+  if (get_stream_index_ < 0) {
+    return;
+  }
+  const size_t count = DeviceConfig_ParamCount();
+  while (static_cast<size_t>(get_stream_index_) < count) {
+    if (!ReplyParam(static_cast<size_t>(get_stream_index_))) {
+      return;
+    }
+    get_stream_index_++;
+  }
+  if ((UartTxUsed() + 16U) > (kUartTxQueueBytes - 1U)) {
+    return;
+  }
+  char detail[12];
+  TextBuf d;
+  Text_Init(&d, detail, sizeof(detail));
+  Text_U32(&d, static_cast<uint32_t>(count));
+  ReplyOk("GET", detail);
+  get_stream_index_ = -1;
+}
+
+void ApplicationController::ReplyInfo() {
+  char buf[640];
+  TextBuf t;
+  Text_Init(&t, buf, sizeof(buf));
+  const DeviceConfigData *cfg = DeviceConfig_Live();
+  Text_Str(&t, "@INFO fw="); Text_Str(&t, kFirmwareName);
+  Text_Str(&t, " ver="); Text_Str(&t, kFirmwareVersion);
+  Text_Str(&t, " id="); Text_U32(&t, DeviceConfig_ActiveCanId());
+  Text_Str(&t, " cfg_id="); Text_U32(&t, cfg->can_id);
+  Text_Str(&t, " mode="); Text_U32(&t, control_mode_cmd);
+  Text_Str(&t, " run="); Text_Str(&t, ModeName(telemetry_.control_mode));
+  Text_Str(&t, " drv="); Text_U32(&t, ((DRV_ENABLE_GPIO_Port->ODR & DRV_ENABLE_Pin) != 0U) ? 1U : 0U);
+  Text_Str(&t, " ae="); Text_U32(&t, control_auto_enable);
+  Text_Str(&t, " telem="); Text_U32(&t, cfg->telemetry);
+  Text_Str(&t, " fault=0x"); Text_Hex(&t, telemetry_.fault_flags & 0xFFFFU, 4U);
+  Text_Str(&t, " latched=0x"); Text_Hex(&t, fault_manager_.latchedFaults() & 0xFFFFU, 4U);
+  Text_Str(&t, " vbus="); Text_Float(&t, foc_.GetState().bus_v);
+  Text_Str(&t, " calib="); Text_U32(&t, calibration_flash_valid);
+  Text_Str(&t, " zero="); Text_Float(&t, control_electrical_zero_rad);
+  Text_Str(&t, " dir="); Text_U32(&t, control_encoder_direction);
+  Text_Str(&t, " cfg="); Text_Str(&t, DeviceConfig_SourceName());
+  Text_Str(&t, " seq="); Text_U32(&t, DeviceConfig_Sequence());
+  Text_Str(&t, " timeout="); Text_U32(&t, cfg->cmd_timeout_ms);
+  Text_Str(&t, " trips="); Text_U32(&t, host_timeout_trip_count_);
+  Text_Str(&t, " drops="); Text_U32(&t, g_uart_tx_drop_count);
+  Text_Str(&t, " up="); Text_U32(&t, HAL_GetTick());
+  Text_Str(&t, " pp="); Text_U32(&t, g_active_pole_pairs_u8);
+  Text_Str(&t, " baud="); Text_U32(&t, cfg->can_baud);
+  Text_Str(&t, " zoff="); Text_Float(&t, control_zero_offset_rad);
+  Text_Str(&t, " zset="); Text_U32(&t, DeviceConfig_ZeroIsSet());
+  Text_Str(&t, " zturn=1");
+  Text_Str(&t, " can_fb="); Text_U32(&t, DeviceConfig_CanBaudFallback());
+  /* ol=off, or ol=ready|active|recover budget=<seconds>. Text_Float strips
+   * trailing zeros, so a full 2 s budget prints as budget=2. Phase off omits
+   * the budget field. This is the limiter state from the last 1 kHz tick. */
+  {
+    const control::OverloadStatus ol = overload_.status();
+    Text_Str(&t, " ol=");
+    Text_Str(&t, control::OverloadPhaseName(ol.phase));
+    if (ol.phase != control::OverloadPhase::Off) {
+      Text_Str(&t, " budget=");
+      Text_Float(&t, ol.budget_s);
+    }
+  }
+  Text_Char(&t, '\n');
+  Reply(t);
+}
+
+void ApplicationController::ReplyFault() {
+  char buf[192];
+  TextBuf t;
+  Text_Init(&t, buf, sizeof(buf));
+  Text_Str(&t, "@FAULT active=0x");
+  Text_Hex(&t, fault_manager_.activeFaults() & 0xFFFFU, 4U);
+  Text_Str(&t, " latched=0x");
+  Text_Hex(&t, fault_manager_.latchedFaults() & 0xFFFFU, 4U);
+  Text_Str(&t, " snap=");
+  Text_U32(&t, fault_snap_valid_);
+  Text_Str(&t, " t=");
+  Text_U32(&t, fault_snap_tick_);
+  Text_Str(&t, " fault=0x");
+  Text_Hex(&t, fault_snap_word_ & 0xFFFFU, 4U);
+  Text_Str(&t, " pos=");
+  Text_Float(&t, fault_snap_pos_);
+  Text_Str(&t, " omega=");
+  Text_Float(&t, fault_snap_omega_);
+  Text_Str(&t, " iq=");
+  Text_Float(&t, fault_snap_iq_);
+  Text_Str(&t, " vbus=");
+  Text_Float(&t, fault_snap_vbus_);
+  Text_Str(&t, " mode=");
+  Text_U32(&t, fault_snap_mode_);
+  Text_Char(&t, '\n');
+  Reply(t);
+}
+
+void ApplicationController::ReplyTlist() {
+  char buf[256];
+  TextBuf t;
+  Text_Init(&t, buf, sizeof(buf));
+  Text_Str(&t, "@TLIST ");
+  for (size_t i = 0U; i < DEVICE_TELEM_CHANNEL_COUNT; ++i) {
+    if (i != 0U) {
+      Text_Char(&t, ',');
+    }
+    Text_Str(&t, kTelemNames[i]);
+  }
+  Text_Char(&t, '\n');
+  Reply(t);
+}
+
+void ApplicationController::ReplyTch() {
+  char buf[192];
+  TextBuf t;
+  Text_Init(&t, buf, sizeof(buf));
+  const uint8_t *map = DeviceConfig_TelemChannels();
+  Text_Str(&t, "@TCH ");
+  for (size_t i = 0U; i < DEVICE_TELEM_SLOTS; ++i) {
+    if (i != 0U) {
+      Text_Char(&t, ',');
+    }
+    const uint8_t id = map[i];
+    if (id < DEVICE_TELEM_CHANNEL_COUNT) {
+      Text_Str(&t, kTelemNames[id]);
+    } else {
+      Text_Str(&t, "?");
+    }
+  }
+  Text_Char(&t, '\n');
+  Reply(t);
+}
+
+bool ApplicationController::IsMotorIdle() const {
+  return (control_mode_cmd == kModeIdle) &&
+         (telemetry_.control_mode == kModeIdle) &&
+         (control_auto_enable == 0U) &&
+         ((DRV_ENABLE_GPIO_Port->ODR & DRV_ENABLE_Pin) == 0U);
+}
+
+void ApplicationController::NotifyHostActivity() {
+  last_host_cmd_tick_ = HAL_GetTick();
+  host_seen_ = 1U;
+}
+
+void ApplicationController::ResyncAfterFlashStall() {
+  /* Flash erase/program stalls the CPU; restart the outer-loop deadline
+   * reference so an intentional save is not reported as a control fault. */
+  last_control_tick_ = HAL_GetTick();
+  last_outer_loop_cyccnt_ = 0U;
+}
+
+void ApplicationController::ApplyBootMode() {
+  const DeviceConfigData *cfg = DeviceConfig_Live();
+  switch (cfg->boot_mode) {
+    case kModeCurrent:
+      SetCurrentRef(cfg->boot_target);
+      SetMode(kModeCurrent);
+      break;
+    case kModeSpeed:
+      SetSpeedRef(Clamp(cfg->boot_target, -kUartSpeedLimitRpm, kUartSpeedLimitRpm) * kRpmToRadS);
+      SetMode(kModeSpeed);
+      break;
+    case kModePosition:
+      /* The encoder is never ready at this point. Entering position here
+       * would chase the pre-init target. Apply it on the first good sample. */
+      boot_position_pending_ = 1U;
+      boot_auto_enable_pending_ = (cfg->boot_auto_enable != 0U) ? 1U : 0U;
+      break;
+    default:
+      break;
+  }
+  if ((cfg->boot_auto_enable != 0U) && (boot_position_pending_ == 0U)) {
+    SetAutoEnable(1U);
+  }
+}
+
+void ApplicationController::CheckHostTimeout(uint32_t now) {
+  const uint16_t timeout = DeviceConfig_Live()->cmd_timeout_ms;
+  if ((timeout == 0U) || (host_seen_ == 0U) || (control_auto_enable != 0U) ||
+      (control_mode_cmd == kModeIdle) || (control_mode_cmd == kModeCalibrate)) {
+    return;
+  }
+  if ((uint32_t)(now - last_host_cmd_tick_) > timeout) {
+    SetCurrentRef(0.0f);
+    Disable();
+    host_timeout_trip_count_++;
+    char buf[48];
+    TextBuf t;
+    Text_Init(&t, buf, sizeof(buf));
+    Text_Str(&t, "@EVT TIMEOUT disabled ms=");
+    Text_U32(&t, timeout);
+    Text_Char(&t, '\n');
+    Reply(t);
+  }
+}
+
+void ApplicationController::ServiceReboot(uint32_t now) {
+  if (reboot_pending_ == 0U) {
+    return;
+  }
+  if (UartTxIdle() || ((uint32_t)(now - reboot_request_tick_) > kRebootDrainTimeoutMs)) {
+    DisarmPowerStage();
+    NVIC_SystemReset();
+  }
+}
+
 void ApplicationController::ExecuteVofaCommand(char *line) {
   if (line == nullptr) {
     return;
   }
-
-  /* Commands are ASCII and newline terminated. Normalize command names so
-   * VOFA+ buttons may send either upper- or lower-case text. */
-  for (char *p = line; *p != '\0'; ++p) {
-    if ((*p >= 'a') && (*p <= 'z')) {
-      *p = static_cast<char>(*p - ('a' - 'A'));
+  Ascii_Upper(line);
+  char *tok[kUartMaxTokens] = {};
+  const size_t n = Ascii_Tokenize(line, tok, kUartMaxTokens);
+  if (n == 0U) {
+    return;
+  }
+  const char *cmd = tok[0];
+  if (n > kUartMaxTokens) {
+    ReplyErr(cmd, "too_many_args");
+    return;
+  }
+  NotifyHostActivity();
+  auto is = [cmd](const char *name) { return std::strcmp(cmd, name) == 0; };
+  float v[kUartMaxTokens] = {};
+  size_t nv = 0U;
+  for (size_t i = 1U; i < n; ++i) {
+    if (Ascii_ParseFloat(tok[i], &v[i - 1U])) {
+      nv++;
+    } else {
+      break;
     }
   }
+  const size_t nargs = n - 1U;
+  char detail[96];
+  TextBuf d;
+  Text_Init(&d, detail, sizeof(detail));
 
-  while ((*line == ' ') || (*line == '\t')) {
-    ++line;
-  }
-  if (*line == '\0') {
+  /* ---- no-argument commands ---- */
+  if (is("PING")) {
+    Text_Str(&d, "up="); Text_U32(&d, HAL_GetTick());
+    char buf[48];
+    TextBuf t;
+    Text_Init(&t, buf, sizeof(buf));
+    Text_Str(&t, "@PONG "); Text_Str(&t, detail); Text_Char(&t, '\n');
+    Reply(t);
     return;
   }
-
-  if ((std::strcmp(line, "STOP") == 0) ||
-      (std::strcmp(line, "IDLE") == 0)) {
+  if (is("HELP")) {
+    ReplyOk("HELP", "STOP RUN ZERO CLEAR CALIB IQ KP KI CUR SPD POS MIT MODE AE TELEM PING INFO GET SET SAVE DEFAULTS RELOAD REBOOT SETZERO TLIST TCH TRATE FAULT");
+    return;
+  }
+  if (is("INFO")) {
+    ReplyInfo();
+    return;
+  }
+  if (is("STOP") || is("IDLE") || is("ESTOP")) {
+    /* UART STOP is a real stop: it also leaves runtime auto-enable. */
+    control_auto_enable = 0U;
     SetCurrentRef(0.0f);
     Disable();
+    ReplyOk("STOP");
     return;
   }
-  if ((std::strcmp(line, "RUN") == 0) ||
-      (std::strcmp(line, "CURRENT") == 0)) {
+  if (is("RUN") || is("CURRENT")) {
     SetMode(kModeCurrent);
+    ReplyOk("RUN", "mode=CURRENT");
     return;
   }
-  if ((std::strcmp(line, "ZERO") == 0) ||
-      (std::strcmp(line, "IQ0") == 0)) {
+  if (is("ZERO") || is("IQ0")) {
     SetCurrentRef(0.0f);
+    ReplyOk("ZERO");
     return;
   }
-  if ((std::strcmp(line, "CLEAR") == 0) ||
-      (std::strcmp(line, "CLR") == 0)) {
+  if (is("CLEAR") || is("CLR")) {
     ClearFaults();
+    Text_Str(&d, "latched=0x"); Text_Hex(&d, fault_manager_.latchedFaults() & 0xFFFFU, 4U);
+    ReplyOk("CLEAR", detail);
     return;
   }
-
-  if ((std::strcmp(line, "CALIB") == 0) ||
-      (std::strcmp(line, "CALIBRATE") == 0)) {
+  if (is("CALIB") || is("CALIBRATE")) {
+    if (!IsMotorIdle()) { ReplyErr("CALIB", "not_idle"); return; }
     SetMode(kModeCalibrate);
+    ReplyOk("CALIB", "started");
+    return;
+  }
+  if (is("SAVE")) {
+    if (!IsMotorIdle()) { ReplyErr("SAVE", "not_idle"); return; }
+    const int bad = DeviceConfig_FirstInvalidParam();
+    if (bad >= 0) {
+      Text_Str(&d, "range "); Text_Str(&d, DeviceConfig_ParamInfo(static_cast<size_t>(bad))->key);
+      ReplyErr("SAVE", detail);
+      return;
+    }
+    uint32_t seq = 0U;
+    const int ok = DeviceConfig_Save(&seq);
+    ResyncAfterFlashStall();
+    if (!ok) { ReplyErr("SAVE", "flash"); return; }
+    Text_Str(&d, "seq="); Text_U32(&d, seq);
+    ReplyOk("SAVE", detail);
+    return;
+  }
+  if (is("DEFAULTS")) {
+    if (!IsMotorIdle()) { ReplyErr("DEFAULTS", "not_idle"); return; }
+    DeviceConfig_RestoreDefaults();
+    ReplyOk("DEFAULTS", "ram_only");
+    return;
+  }
+  if (is("RELOAD")) {
+    if (!IsMotorIdle()) { ReplyErr("RELOAD", "not_idle"); return; }
+    DeviceConfig_Reload();
+    Text_Str(&d, "cfg="); Text_Str(&d, DeviceConfig_SourceName());
+    ReplyOk("RELOAD", detail);
+    return;
+  }
+  if (is("REBOOT")) {
+    if (!IsMotorIdle()) { ReplyErr("REBOOT", "not_idle"); return; }
+    ReplyOk("REBOOT");
+    reboot_pending_ = 1U;
+    reboot_request_tick_ = HAL_GetTick();
+    return;
+  }
+  if (is("GET")) {
+    if (nargs == 0U) {
+      get_stream_index_ = 0;
+      ServiceGetStream();
+      return;
+    }
+    const int idx = DeviceConfig_FindParam(tok[1]);
+    if (idx < 0) { ReplyErr("GET", "unknown_key"); return; }
+    (void)ReplyParam(static_cast<size_t>(idx));
+    ReplyOk("GET", "1");
+    return;
+  }
+  if (is("SET")) {
+    if (nargs != 2U) { ReplyErr("SET", "usage SET KEY VALUE"); return; }
+    const int idx = DeviceConfig_FindParam(tok[1]);
+    float value = 0.0f;
+    if (idx < 0) { ReplyErr("SET", "unknown_key"); return; }
+    if ((DeviceConfig_SetRequiresIdle(tok[1]) != 0) && !IsMotorIdle()) {
+      ReplyErr("SET", "not_idle");
+      return;
+    }
+    if (!Ascii_ParseFloat(tok[2], &value)) { ReplyErr("SET", "bad_value"); return; }
+    const DeviceConfigStatus st = DeviceConfig_SetParam(static_cast<size_t>(idx), value);
+    const DeviceParamInfo *info = DeviceConfig_ParamInfo(static_cast<size_t>(idx));
+    if (st != DEVCFG_OK) {
+      Text_Str(&d, "range "); Text_Str(&d, info->key); Text_Char(&d, ' ');
+      Text_Float(&d, info->min); Text_Str(&d, ".."); Text_Float(&d, info->max);
+      ReplyErr("SET", detail);
+      return;
+    }
+    Text_Str(&d, info->key); Text_Char(&d, '=');
+    Text_Float(&d, DeviceConfig_GetParam(static_cast<size_t>(idx)));
+    if (info->reboot_required != 0U) {
+      Text_Str(&d, " reboot=1");
+    }
+    ReplyOk("SET", detail);
+    return;
+  }
+  if (is("SETZERO")) {
+    if (nargs != 0U) { ReplyErr("SETZERO", "usage SETZERO"); return; }
+    if (!IsMotorIdle()) { ReplyErr("SETZERO", "not_idle"); return; }
+    if ((encoder_valid_ == 0U) || (position_inited_ == 0U)) {
+      ReplyErr("SETZERO", "no_encoder");
+      return;
+    }
+    const int zidx = DeviceConfig_FindParam("ZERO_OFFSET");
+    const float offset = Wrap0To2Pi(position_unwrapped_rad_);
+    if ((zidx < 0) ||
+        (DeviceConfig_SetParam(static_cast<size_t>(zidx), offset) != DEVCFG_OK)) {
+      ReplyErr("SETZERO", "range");
+      return;
+    }
+    Text_Str(&d, "zero=");
+    Text_Float(&d, control_zero_offset_rad);
+    Text_Str(&d, " saved=0");
+    ReplyOk("SETZERO", detail);
+    return;
+  }
+  if (is("TLIST")) {
+    ReplyTlist();
+    return;
+  }
+  if (is("TCH")) {
+    if (nargs == 0U) {
+      ReplyTch();
+      return;
+    }
+    if (nargs != DEVICE_TELEM_SLOTS) {
+      ReplyErr("TCH", "usage TCH ch0,ch1,...,ch15");
+      return;
+    }
+    uint8_t channels[DEVICE_TELEM_SLOTS] = {};
+    for (size_t i = 0U; i < DEVICE_TELEM_SLOTS; ++i) {
+      const int id = FindTelemChannel(tok[i + 1U]);
+      if (id < 0) {
+        ReplyErr("TCH", "unknown_channel");
+        return;
+      }
+      channels[i] = static_cast<uint8_t>(id);
+    }
+    if (DeviceConfig_SetTelemChannels(channels, DEVICE_TELEM_SLOTS) == 0) {
+      ReplyErr("TCH", "range");
+      return;
+    }
+    ReplyOk("TCH");
+    return;
+  }
+  if (is("TRATE")) {
+    if (nargs == 0U) {
+      uint32_t period_ms = 0U;
+      const uint16_t hz = DeviceConfig_TelemHz();
+      (void)DeviceConfig_TelemPeriodMs(hz, &period_ms);
+      Text_Str(&d, "hz=");
+      Text_U32(&d, hz);
+      Text_Str(&d, " period_ms=");
+      Text_U32(&d, period_ms);
+      ReplyOk("TRATE", detail);
+      return;
+    }
+    if (nargs != 1U) { ReplyErr("TRATE", "usage TRATE hz"); return; }
+    float hz_value = 0.0f;
+    if (!Ascii_ParseFloat(tok[1], &hz_value)) { ReplyErr("TRATE", "bad_value"); return; }
+    const int hz_int = static_cast<int>(hz_value);
+    if ((hz_int < 0) || (static_cast<float>(hz_int) != hz_value)) {
+      ReplyErr("TRATE", "bad_value");
+      return;
+    }
+    if (DeviceConfig_SetTelemHz(static_cast<uint16_t>(hz_int)) == 0) {
+      Text_Str(&d, "bandwidth max=");
+      Text_U32(&d, DeviceConfig_MaxTelemHz());
+      ReplyErr("TRATE", detail);
+      return;
+    }
+    uint32_t period_ms = 0U;
+    (void)DeviceConfig_TelemPeriodMs(DeviceConfig_TelemHz(), &period_ms);
+    Text_Str(&d, "hz=");
+    Text_U32(&d, DeviceConfig_TelemHz());
+    Text_Str(&d, " period_ms=");
+    Text_U32(&d, period_ms);
+    ReplyOk("TRATE", detail);
+    return;
+  }
+  if (is("FAULT")) {
+    if (nargs != 0U) { ReplyErr("FAULT", "too_many_args"); return; }
+    ReplyFault();
     return;
   }
 
-  char *separator = line;
-  while ((*separator != '\0') && (*separator != ' ') &&
-         (*separator != '\t') && (*separator != '=')) {
-    ++separator;
-  }
-  if (*separator == '\0') {
+  /* ---- numeric-argument commands ---- */
+  if (is("MODE")) {
+    const int m = (nargs == 1U) ? ParseModeToken(tok[1]) : -1;
+    if (m < 0) { ReplyErr("MODE", "usage MODE 0-4|IDLE|CURRENT|SPEED|POSITION|MIT"); return; }
+    if ((m == kModePosition) || (m == kModeMit)) {
+      if (!PositionEncoderReady()) {
+        ReplyErr("MODE", "enc_not_ready");
+        SetMode(static_cast<uint8_t>(m)); /* refuses entry, cancels deferred boot */
+        return;
+      }
+    }
+    if (m == kModeIdle) {
+      SetCurrentRef(0.0f);
+      Disable();
+    } else {
+      SetMode(static_cast<uint8_t>(m));
+    }
+    Text_Str(&d, "mode="); Text_Str(&d, ModeName(static_cast<uint8_t>(m)));
+    ReplyOk("MODE", detail);
     return;
   }
-  *separator++ = '\0';
-  while ((*separator == ' ') || (*separator == '\t') ||
-         (*separator == '=')) {
-    ++separator;
-  }
-
-  char *end = nullptr;
-  const float value = std::strtof(separator, &end);
-  if ((end == separator) || !std::isfinite(value)) {
+  if (nv != nargs) {
+    ReplyErr(cmd, "bad_value");
     return;
   }
-  while ((*end == ' ') || (*end == '\t')) {
-    ++end;
-  }
-  if (*end != '\0') {
+  if (is("MIT")) {
+    if (nargs != 5U) { ReplyErr("MIT", "usage MIT p v kp kd iq"); return; }
+    if (!PositionEncoderReady()) {
+      ReplyErr("MIT", "enc_not_ready");
+      SetMode(kModeMit);
+      return;
+    }
+    SetMode(kModeMit);
+    SetMitCommand(Clamp(v[0], -kMitPMax, kMitPMax), Clamp(v[1], -kMitVMax, kMitVMax),
+                  Clamp(v[2], 0.0f, kMitKpMax), Clamp(v[3], 0.0f, kMitKdMax), v[4]);
+    ReplyOk("MIT");
     return;
   }
-
-  if (std::strcmp(line, "IQ") == 0) {
+  if (nargs != 1U) {
+    const bool known = is("IQ") || is("CUR") || is("SPD") || is("POS") ||
+                       is("KP") || is("KI") || is("AE") || is("TELEM");
+    ReplyErr(cmd, !known ? "unknown" : ((nargs == 0U) ? "missing_value" : "too_many_args"));
+    return;
+  }
+  const float value = v[0];
+  if (is("IQ")) {
     SetCurrentRef(value);
-  } else if (std::strcmp(line, "KP") == 0) {
+    Text_Str(&d, "iq="); Text_Float(&d, control_current_test_iq_ref_a);
+    ReplyOk("IQ", detail);
+  } else if (is("CUR")) {
+    SetCurrentRef(value);
+    SetMode(kModeCurrent);
+    Text_Str(&d, "iq="); Text_Float(&d, control_current_test_iq_ref_a);
+    ReplyOk("CUR", detail);
+  } else if (is("SPD")) {
+    const float rpm = Clamp(value, -kUartSpeedLimitRpm, kUartSpeedLimitRpm);
+    SetMode(kModeSpeed);
+    SetSpeedRef(rpm * kRpmToRadS);
+    Text_Str(&d, "rpm="); Text_Float(&d, rpm);
+    ReplyOk("SPD", detail);
+  } else if (is("POS")) {
+    const float rad = Clamp(value, -kUartPositionLimitRad, kUartPositionLimitRad);
+    if (!PositionEncoderReady()) {
+      ReplyErr("POS", "enc_not_ready");
+      SetMode(kModePosition);
+      return;
+    }
+    SetMode(kModePosition);
+    SetPositionRef(rad);
+    Text_Str(&d, "rad="); Text_Float(&d, rad);
+    ReplyOk("POS", detail);
+  } else if (is("KP")) {
     control_current_pi_kp = Clamp(value, 0.0f, kVofaCurrentKpMax);
-  } else if (std::strcmp(line, "KI") == 0) {
+    Text_Str(&d, "kp="); Text_Float(&d, control_current_pi_kp);
+    ReplyOk("KP", detail);
+  } else if (is("KI")) {
     control_current_pi_ki = Clamp(value, 0.0f, kVofaCurrentKiMax);
+    Text_Str(&d, "ki="); Text_Float(&d, control_current_pi_ki);
+    ReplyOk("KI", detail);
+  } else if (is("AE")) {
+    SetAutoEnable((value != 0.0f) ? 1U : 0U);
+    Text_Str(&d, "ae="); Text_U32(&d, control_auto_enable);
+    ReplyOk("AE", detail);
+  } else if (is("TELEM")) {
+    const int idx = DeviceConfig_FindParam("TELEM");
+    if ((idx < 0) || (DeviceConfig_SetParam(static_cast<size_t>(idx), (value != 0.0f) ? 1.0f : 0.0f) != DEVCFG_OK)) {
+      ReplyErr("TELEM", "internal");
+      return;
+    }
+    Text_Str(&d, "telem="); Text_U32(&d, DeviceConfig_Live()->telemetry);
+    ReplyOk("TELEM", detail);
+  } else {
+    ReplyErr(cmd, "unknown");
   }
 }
 
@@ -1098,6 +2033,12 @@ void ApplicationController::ProcessVofaCommands() {
   uint8_t byte = 0U;
   while (VofaRxPop(byte)) {
     if ((byte == '\r') || (byte == '\n')) {
+      if (vofa_line_overflow_ != 0U) {
+        vofa_line_overflow_ = 0U;
+        vofa_command_length_ = 0U;
+        ReplyErr("LINE", "too_long");
+        continue;
+      }
       if (vofa_command_length_ != 0U) {
         vofa_command_line_[vofa_command_length_] = '\0';
         ExecuteVofaCommand(vofa_command_line_.data());
@@ -1112,7 +2053,7 @@ void ApplicationController::ProcessVofaCommands() {
             static_cast<char>(byte);
       } else {
         /* Drop an overlong command instead of executing a truncated one. */
-        vofa_command_length_ = 0U;
+        vofa_line_overflow_ = 1U;
       }
     }
   }
@@ -1124,35 +2065,28 @@ void ApplicationController::SendVofaDebug() {
   }
 
   const uint32_t now = HAL_GetTick();
-  if ((now - last_vofa_tick_) < kVofaDebugPeriodMs) {
+  uint32_t period_ms = kVofaDebugPeriodMs;
+  if (DeviceConfig_TelemPeriodMs(DeviceConfig_TelemHz(), &period_ms) == 0) {
+    period_ms = kVofaDebugPeriodMs;
+  }
+  if ((now - last_vofa_tick_) < period_ms) {
     return;
   }
   last_vofa_tick_ = now;
+  if (DeviceConfig_Live()->telemetry == 0U) {
+    return;
+  }
 
   const auto &foc = foc_.GetState();
+  const uint8_t *map = DeviceConfig_TelemChannels();
   std::array<float, kVofaFrameValueCount> frame_values = {};
-  /* VOFA+ JustFloat current-loop monitor channels (100 Hz).
-   * SVPWM duty A/B/C are display-only telemetry; RX commands cannot write
-   * duty values or bypass the closed current loop.
-   */
-  frame_values[0] = foc.id_ref_a;
-  frame_values[1] = foc.id_a;
-  frame_values[2] = foc.iq_ref_a;
-  frame_values[3] = foc.iq_a;
-  frame_values[4] = foc.vd_unsat_v;
-  frame_values[5] = foc.vq_unsat_v;
-  frame_values[6] = foc.vd_sat_v;
-  frame_values[7] = foc.vq_sat_v;
-  frame_values[8] = foc.bus_v;
-  frame_values[9] = static_cast<float>(foc.voltage_saturated);
-  frame_values[10] = speed_feedback_estimator_.state().velocity_rad_s;
-  frame_values[11] = foc.duty_a;
-  frame_values[12] = foc.duty_b;
-  frame_values[13] = foc.duty_c;
-  frame_values[14] = control_current_pi_kp;
-  frame_values[15] = control_current_pi_ki;
+  /* Default map is the historical 16 JustFloat channels. Duty values are
+   * display-only; RX commands cannot write them. */
+  for (size_t i = 0U; i < kVofaFrameValueCount; ++i) {
+    frame_values[i] = TelemValue(map[i], foc);
+  }
 
-  std::array<uint8_t, (sizeof(float) * kVofaFrameValueCount) + 4U> frame = {};
+  std::array<uint8_t, kVofaFrameBytes> frame = {};
   std::memcpy(frame.data(),
               frame_values.data(),
               frame_values.size() * sizeof(float));
@@ -1161,16 +2095,45 @@ void ApplicationController::SendVofaDebug() {
   frame[kFrameTailOffset + 1U] = kVofaJustfloatTail1;
   frame[kFrameTailOffset + 2U] = kVofaJustfloatTail2;
   frame[kFrameTailOffset + 3U] = kVofaJustfloatTail3;
-  if (debug_uart_ != nullptr) {
-    const uint16_t next_head =
-        static_cast<uint16_t>((g_vofa_head + 1U) % kVofaRingFrames);
-    if (next_head != g_vofa_tail) {
-      std::memcpy(&g_vofa_ring[g_vofa_head * kVofaFrameBytes],
-                  frame.data(),
-                  kVofaFrameBytes);
-      g_vofa_head = next_head;
-    }
-    VofaPump(debug_uart_);
+  (void)UartTxEnqueue(frame.data(), frame.size(), kUartTxTelemetryHighWater);
+}
+
+float ApplicationController::TelemValue(uint8_t index,
+                                        const control::FOCState &foc) const {
+  const float omega = speed_feedback_estimator_.state().velocity_rad_s;
+  switch (index) {
+    case 0U: return foc.id_ref_a;
+    case 1U: return foc.id_a;
+    case 2U: return foc.iq_ref_a;
+    case 3U: return foc.iq_a;
+    case 4U: return foc.vd_unsat_v;
+    case 5U: return foc.vq_unsat_v;
+    case 6U: return foc.vd_sat_v;
+    case 7U: return foc.vq_sat_v;
+    case 8U: return foc.bus_v;
+    case 9U: return static_cast<float>(foc.voltage_saturated);
+    case 10U: return omega;
+    case 11U: return foc.duty_a;
+    case 12U: return foc.duty_b;
+    case 13U: return foc.duty_c;
+    case 14U: return control_current_pi_kp;
+    case 15U: return control_current_pi_ki;
+    case 16U: return current_.ia_a;
+    case 17U: return current_.ib_a;
+    case 18U: return -(current_.ia_a + current_.ib_a);
+    case 19U: return foc.vd_v;
+    case 20U: return foc.vq_v;
+    case 21U: return omega * kRadSToRpm;
+    case 22U: return FeedbackPosition();
+    case 23U: return foc.electrical_angle_rad;
+    case 24U:
+      /* Amplitude-invariant Clarke: P = 1.5*(vd*id + vq*iq). */
+      return 1.5f * ((foc.vd_sat_v * foc.id_a) + (foc.vq_sat_v * foc.iq_a));
+    case 25U: return control_iq_limit_a;
+    case 26U: return static_cast<float>(fault_manager_.latchedFaults() & 0xFFFFU);
+    case 27U: return static_cast<float>(telemetry_.control_mode);
+    case 28U: return overload_.status().budget_s;
+    default: return 0.0f;
   }
 }
 
@@ -1194,6 +2157,9 @@ void ApplicationController::UpdateUnwrappedPosition() {
 
 void ApplicationController::Update() {
   ProcessVofaCommands();
+  VofaPump(debug_uart_);
+  ServiceGetStream();
+  ServiceReboot(HAL_GetTick());
 
   const auto &foc_snap = foc_.GetState();
   if (foc_snap.isr_overrun_count > last_foc_overrun_count_) {
@@ -1225,6 +2191,7 @@ void ApplicationController::Update() {
   last_outer_loop_cyccnt_ = cyccnt;
   outer_loop_count_++;
 
+  CheckHostTimeout(now);
   fault_manager_.clearActiveFaults();
 
   // Keep angle and timestamp from the same DMA publication.
@@ -1255,7 +2222,7 @@ void ApplicationController::Update() {
       telemetry_.encoder_fault_age_cycles = encoder_age_cycles;
       telemetry_.encoder_fault_valid_count =
           encoder_health.valid_sample_count;
-      fault_manager_.setFault(safety::Fault::EncoderComm);
+      NoteFault(safety::Fault::EncoderComm);
     }
   }
   (void)encoder_hw_.timeoutStuckTransfer();
@@ -1285,16 +2252,33 @@ void ApplicationController::Update() {
     }
   }
   position_unwrapped_rad_ = rotor_estimator_.state().position_rad;
+  if (rotor_estimator_.state().pll_sample_count != 0U) {
+    position_inited_ = 1U;
+  }
+  ServiceZeroAnchor();
+  if ((boot_position_pending_ != 0U) && PositionEncoderReady() &&
+      (control_mode_cmd == kModeIdle)) {
+    const DeviceConfigData *boot_cfg = DeviceConfig_Live();
+    const uint8_t boot_ae = boot_auto_enable_pending_;
+    boot_position_pending_ = 0U;
+    boot_auto_enable_pending_ = 0U;
+    SetMode(kModePosition);
+    SetPositionRef(Clamp(boot_cfg->boot_target, -kUartPositionLimitRad,
+                         kUartPositionLimitRad));
+    if (boot_ae != 0U) {
+      control_auto_enable = 1U;
+    }
+  }
 
   {
     current_ = foc_.GetLastCurrent();
     const auto &foc_snap = foc_.GetState();
     const auto &health = current_sense_.health();
     if (health.invalid_sample_count > last_invalid_sample_count_) {
-      fault_manager_.setFault(safety::Fault::CurrentSense);
+      NoteFault(safety::Fault::CurrentSense);
     }
     if (foc_snap.overcurrent_trip_count > last_overcurrent_trip_count_) {
-      fault_manager_.setFault(safety::Fault::OverCurrent);
+      NoteFault(safety::Fault::OverCurrent);
     }
     last_invalid_sample_count_ = health.invalid_sample_count;
     last_overcurrent_trip_count_ = foc_snap.overcurrent_trip_count;
@@ -1311,14 +2295,19 @@ void ApplicationController::Update() {
     }
     if ((drv_fault_ok_ms_ >= kDrvFaultSettleMs) &&
         (drv_fault_low_ms_ >= kDrvFaultLowDebounceMs)) {
-      fault_manager_.setFault(safety::Fault::Driver);
+      NoteFault(safety::Fault::Driver);
     }
   }
   const float arm_bus_v = foc_snap.bus_v;
-  if (arm_bus_v < kBusMinEnableV) {
-    fault_manager_.setFault(safety::Fault::BusUndervoltage);
-  } else if (arm_bus_v > 40.0f) {
-    fault_manager_.setFault(safety::Fault::BusOvervoltage);
+  float bus_min_v = 0.0f;
+  float bus_max_v = 0.0f;
+  BusWindow(&bus_min_v, &bus_max_v);
+  foc_.SetMinBusVoltage(bus_min_v);
+  identifier_.SetMinBusV(bus_min_v);
+  if (arm_bus_v < bus_min_v) {
+    NoteFault(safety::Fault::BusUndervoltage);
+  } else if (arm_bus_v > bus_max_v) {
+    NoteFault(safety::Fault::BusOvervoltage);
   }
   telemetry_.fault_flags = fault_manager_.latchedFaults();
 
@@ -1380,26 +2369,72 @@ void ApplicationController::Update() {
     OnModeEnter(control_mode, last_control_mode_);
     last_control_mode_ = control_mode;
   }
+  if ((position_align_on_ready_ != 0U) && PositionEncoderReady()) {
+    position_align_on_ready_ = 0U;
+    control_position_target_rad = FeedbackPosition();
+    trajectory_.setTarget(control_position_target_rad);
+    SyncCmdRampIdle(pos_ramp_, control_position_target_rad,
+                    control_position_target_rad);
+  }
+  if ((mit_align_on_ready_ != 0U) && PositionEncoderReady()) {
+    mit_align_on_ready_ = 0U;
+    control_mit_pos_rad = FeedbackPosition();
+    control_mit_vel_rad_s = 0.0f;
+    control_mit_iq_ff_a = 0.0f;
+  }
 
-  float iq_ref = 0.0f;
+  /* Speed-loop ceiling follows the configured overload current even while
+   * recovering, so a saturated speed command stays visible to the budget.
+   * 1 kHz is enough: one millisecond is 0.01% of a 10 s budget, and the
+   * 20 kHz ISR only clamps to the limit published after this step. */
+  const control::OverloadConfig ol_cfg = OverloadConfigFromParams();
+  const float speed_ceiling = control::OverloadLimiter::CommandCeiling(ol_cfg);
+  if (speed_ceiling != applied_speed_ceiling_a_) {
+    applied_speed_ceiling_a_ = speed_ceiling;
+    speed_controller_.setIqLimit(speed_ceiling);
+  }
+
+  float iq_preclamp = 0.0f;
   const float mech_vel = speed_feedback_estimator_.state().velocity_rad_s;
   if (control_mode == kModeSpeed) {
     telemetry_.speed_branch_exec_count++;
-    speed_ref_applied_rad_s_ =
-        SlewRateLimit(speed_ref_applied_rad_s_,
-                      control_velocity_ref_rad_s,
+    const uint16_t spd_ms = DeviceConfig_Live()->spd_ramp_ms;
+    if (spd_ms == 0U) {
+      speed_ref_applied_rad_s_ =
+          SlewRateLimit(speed_ref_applied_rad_s_,
+                        control_velocity_ref_rad_s,
+                        kSpeedRefRampRadS2 * kControlDtS);
+      SyncCmdRampIdle(spd_ramp_, speed_ref_applied_rad_s_, control_velocity_ref_rad_s);
+    } else {
+      speed_ref_applied_rad_s_ =
+          StepCmdRamp(spd_ramp_, control_velocity_ref_rad_s, spd_ms,
                       kSpeedRefRampRadS2 * kControlDtS);
+    }
     active_velocity_ref_rad_s_ = speed_ref_applied_rad_s_;
     active_accel_ref_rad_s2_ = 0.0f;
     speed_controller_.setReference(active_velocity_ref_rad_s_);
-    iq_ref = kTorqueIqSign * speed_controller_.update(mech_vel, kControlDtS);
+    iq_preclamp = kTorqueIqSign * speed_controller_.update(mech_vel, kControlDtS);
   } else if (control_mode == kModePosition) {
-    const auto &traj = trajectory_.update(position_unwrapped_rad_, kControlDtS);
+    const uint16_t pos_ms = DeviceConfig_Live()->pos_ramp_ms;
+    if (pos_ms == 0U) {
+      if (pos_ramp_timed_ != 0U) {
+        trajectory_.setTarget(control_position_target_rad);
+        pos_ramp_timed_ = 0U;
+      }
+      SyncCmdRampIdle(pos_ramp_, control_position_target_rad, control_position_target_rad);
+    } else {
+      trajectory_.setTarget(
+          StepCmdRamp(pos_ramp_, control_position_target_rad, pos_ms,
+                      control_position_velocity_limit_rad_s * kControlDtS));
+      pos_ramp_timed_ = 1U;
+    }
+    const float position_fb = FeedbackPosition();
+    const auto &traj = trajectory_.update(position_fb, kControlDtS);
     active_position_ref_rad_ = traj.position_rad;
     active_accel_ref_rad_s2_ = traj.acceleration_rad_s2;
     const float position_vel_cmd =
         position_controller_.update(traj.position_rad,
-                                    position_unwrapped_rad_,
+                                    position_fb,
                                     mech_vel,
                                     kControlDtS);
     active_velocity_ref_rad_s_ =
@@ -1407,24 +2442,52 @@ void ApplicationController::Update() {
               -control_position_velocity_limit_rad_s,
               control_position_velocity_limit_rad_s);
     speed_controller_.setReference(active_velocity_ref_rad_s_);
-    iq_ref = kTorqueIqSign * speed_controller_.update(mech_vel, kControlDtS);
+    iq_preclamp = kTorqueIqSign * speed_controller_.update(mech_vel, kControlDtS);
   } else if (control_mode == kModeMit) {
-    const float position_error = control_mit_pos_rad - position_unwrapped_rad_;
+    const float position_error = control_mit_pos_rad - FeedbackPosition();
     const float velocity_error = control_mit_vel_rad_s - mech_vel;
-    iq_ref =
+    const float mit_sum =
         kTorqueIqSign *
         ((control_mit_kp * position_error) +
          (control_mit_kd * velocity_error) +
          control_mit_iq_ff_a);
-    iq_ref = Clamp(iq_ref, -kIqSoftLimitA, kIqSoftLimitA);
+    iq_preclamp = Clamp(mit_sum, -IQ_HARD_MAX_A, IQ_HARD_MAX_A);
     active_velocity_ref_rad_s_ = control_mit_vel_rad_s;
     active_accel_ref_rad_s2_ = 0.0f;
+  } else if (control_mode == kModeCurrent) {
+    const uint16_t cur_ms = DeviceConfig_Live()->cur_ramp_ms;
+    if (cur_ms == 0U) {
+      current_test_iq_ref_a_ =
+          SlewRateLimit(current_test_iq_ref_a_,
+                        control_current_test_iq_ref_a,
+                        kCurrentTestRampAS * kControlDtS);
+      SyncCmdRampIdle(cur_ramp_, current_test_iq_ref_a_, control_current_test_iq_ref_a);
+    } else {
+      current_test_iq_ref_a_ =
+          StepCmdRamp(cur_ramp_, control_current_test_iq_ref_a, cur_ms,
+                      kCurrentTestRampAS * kControlDtS);
+    }
+    iq_preclamp = current_test_iq_ref_a_;
   } else {
     active_velocity_ref_rad_s_ = 0.0f;
     active_accel_ref_rad_s2_ = 0.0f;
   }
 
-  float omega_e = mech_vel * kMotorPolePairs;
+  /* Demand is the larger of the pre-clamp command and the measured Iq.
+   * foc_snap.iq_a is the live FOC state, not a copy from the top of Update. */
+  const float ol_demand =
+      std::max(std::fabs(iq_preclamp), std::fabs(foc_snap.iq_a));
+  const control::OverloadStatus ol_status =
+      overload_.step(ol_cfg, ol_demand, kControlDtS);
+  if (ol_status.effective_a != applied_iq_limit_a_) {
+    applied_iq_limit_a_ = ol_status.effective_a;
+    foc_.SetCurrentLimit(applied_iq_limit_a_);
+  }
+  const float iq_ref =
+      Clamp(iq_preclamp, -ol_status.effective_a, ol_status.effective_a);
+
+  float omega_e = mech_vel * g_active_pole_pairs;
+  ApplyMotorModelIfChanged();
   foc_.SetOmegaE(omega_e);
 
   if ((control_current_pi_kp != applied_current_pi_kp_) ||
@@ -1441,14 +2504,6 @@ void ApplicationController::Update() {
   if (control_current_pi_kaw != applied_current_pi_kaw_) {
     applied_current_pi_kaw_ = control_current_pi_kaw;
     foc_.SetCurrentKaw(applied_current_pi_kaw_);
-  }
-
-  if (control_iq_limit_a != applied_iq_limit_a_) {
-    applied_iq_limit_a_ = control_iq_limit_a;
-    foc_.SetCurrentLimit(applied_iq_limit_a_);
-    speed_controller_.init(applied_speed_pi_kp_,
-                           applied_speed_pi_ki_,
-                           applied_iq_limit_a_);
   }
 
   if ((control_speed_pi_kp != applied_speed_pi_kp_) ||
@@ -1528,6 +2583,9 @@ void ApplicationController::Update() {
       control_calibrate_enable = 0U;
       control_enable = 0U;
       control_mode_cmd = kModeIdle;
+      if (calib_state_ == CalibState::kFail) {
+        ReplyErr("CALIB", "failed");
+      }
       if (calib_state_ == CalibState::kDone) {
         CalibrationStoreData calibration = {};
         calibration.electrical_zero_rad = control_electrical_zero_rad;
@@ -1538,9 +2596,12 @@ void ApplicationController::Update() {
           calibration_flash_valid = 1U;
           calibration_flash_status = 2U; /* Saved and read-back verified. */
           calibration_flash_save_count++;
+          DeviceConfig_OnCalibrationSaved(control_encoder_direction, saved_sequence);
+          ReplyOk("CALIB", "done saved");
           calib_state_ = CalibState::kIdle;
         } else {
           calibration_flash_status = 3U; /* Calibration ran, save failed. */
+          ReplyErr("CALIB", "flash");
           calib_state_ = CalibState::kFail;
         }
         /* Flash erase/program stalls the CPU; restart the outer-loop deadline
@@ -1593,11 +2654,6 @@ void ApplicationController::Update() {
     ArmPowerStage();
     foc_.SetAngleOverride(0U, electrical_angle);
     foc_.SetOpenLoopVoltage(0U, 0.0f, 0.0f);
-    current_test_iq_ref_a_ =
-        SlewRateLimit(current_test_iq_ref_a_,
-                      control_current_test_iq_ref_a,
-                      kCurrentTestRampAS * kControlDtS);
-    iq_ref = current_test_iq_ref_a_;
     foc_.SetRefs(0.0f, iq_ref);
   } else if (control_mode == kModeOpenLoop) {
     ArmPowerStage();
@@ -1607,11 +2663,12 @@ void ApplicationController::Update() {
                       kOpenLoopRampRadS2 * kControlDtS);
     open_loop_electrical_angle_rad_ =
         Wrap0To2Pi(open_loop_electrical_angle_rad_ +
-                   (open_loop_velocity_rad_s_ * kMotorPolePairs * kControlDtS));
+                   (open_loop_velocity_rad_s_ * g_active_pole_pairs * kControlDtS));
 
     float bus_v = current_.bus_v;
-    if (bus_v < kBusMinEnableV) {
-      bus_v = kBusMinEnableV;
+    const float open_loop_floor = DeviceConfig_EffectiveVbusMin(control_vbus_min_v);
+    if (bus_v < open_loop_floor) {
+      bus_v = open_loop_floor;
     }
 
     const float speed_abs = std::fabs(open_loop_velocity_rad_s_);
@@ -1677,7 +2734,7 @@ void ApplicationController::Update() {
   telemetry_.rs_est = ident.result.rs_ohm;
   telemetry_.l_est = ident.result.ld_h;
   telemetry_.flux_est = ident.result.flux_wb;
-  telemetry_.position_rad = position_unwrapped_rad_;
+  telemetry_.position_rad = FeedbackPosition();
   if (control_mode == kModeMit) {
     telemetry_.position_ref_rad = control_mit_pos_rad;
   } else {
@@ -1734,6 +2791,7 @@ void ApplicationController::Update() {
   telemetry_.calibration_flash_save_count = calibration_flash_save_count;
 
   SendVofaDebug();
+  VofaPump(debug_uart_);
   (void)pwm_timer_;
 }
 
@@ -1795,6 +2853,10 @@ extern "C" void ControlApp_SetMode(uint8_t mode) {
   app::g_application.SetMode(mode);
 }
 
+extern "C" uint8_t ControlApp_PositionEncoderReady(void) {
+  return app::g_application.PositionEncoderReady() ? 1U : 0U;
+}
+
 extern "C" uint8_t ControlApp_GetMode(void) {
   return control_mode_cmd;
 }
@@ -1833,6 +2895,10 @@ extern "C" void ControlApp_Disable(void) {
 
 extern "C" void ControlApp_ClearFault(void) {
   app::g_application.ClearFaults();
+}
+
+extern "C" void ControlApp_NotifyHostActivity(void) {
+  app::g_application.NotifyHostActivity();
 }
 
 extern "C" uint32_t ControlApp_GetLatchedFaults(void) {
