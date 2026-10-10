@@ -11,10 +11,15 @@ constexpr float kAdcFullScaleF = 4095.0f;
 /* INA240 bidirectional mid-rail (REF1/REF2 = 3.3 V / 2 on this board). */
 constexpr float kIna240ZeroDefaultV = 1.65f;
 /*
- * Board: INA240A2 + low-side shunt.
- *   A2 gain = 50 V/V  (TI datasheet)
- *   Rshunt  = 10 mOhm
- *   V/A     = Rshunt * Gain = 0.010 * 50 = 0.5 V/A
+ * Board GB4310_G431KBT6 V1.0: inline (in-phase) shunts, not low-side.
+ *   R12 / R13 = 10 mOhm in series with the U and V phase outputs
+ *   (U_SENSE -> U, V_SENSE -> V). INA240A2 U7/U8 measure them.
+ *   REF1/REF2 sit at mid-rail. Outputs go to ADC1_IN1 / ADC1_IN2.
+ *   DRV8313 is U4. INA240's PWM rejection is what makes a valley sample
+ *   valid while a phase FET is switching; the low-side FET does not have
+ *   to be on. There is no W-phase shunt; Ic is reconstructed as -(Ia+Ib).
+ *   A2 gain = 50 V/V (TI datasheet)
+ *   V/A     = 0.010 * 50 = 0.5 V/A
  * Sense polarity follows the INA240 datasheet convention; open-loop
  * voltage/current checks on this board show no extra inversion is needed.
  */

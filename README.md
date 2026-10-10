@@ -2,7 +2,7 @@
 
 STM32G431KBT6 / DRV8313 的 FOC 电机控制固件，使用 MT6701 编码器，支持电流环、速度环、位置环、CAN 和 UART 通信。
 
-当前源码版本 3.1.0。`IQ_LIM` 是持续电流上限（0–2.5 A）。超限参数 `OL_EN`、`OL_IQ`、`OL_TIME_S` 的范围、2.80 A 硬上限和预算算法见 `docs/UART_PROTOCOL.md`。
+当前源码版本 3.1.1。`IQ_LIM` 是持续电流上限（0–2.5 A）。超限参数 `OL_EN`、`OL_IQ`、`OL_TIME_S` 的范围、2.80 A 硬上限和预算算法见 `docs/UART_PROTOCOL.md`。
 
 公开仓库只保留编译固件所需的源码、CMSIS/HAL 依赖、启动文件、链接脚本、CMake 配置和第三方许可证。驱动目录为精简子集。
 

@@ -272,7 +272,7 @@ volatile float control_vbus_max_v = DEVICE_DEFAULT_VBUS_MAX_V;
 volatile float control_zero_offset_rad = 0.0f;
 volatile float control_rs_ohm = DEVICE_DEFAULT_RS_OHM;
 volatile float control_ls_h = DEVICE_DEFAULT_LS_H;
-volatile float control_max_modulation = 0.90f;
+volatile float control_max_modulation = DEVICE_MAX_MOD_DEFAULT;
 volatile uint8_t control_decoupling_enable = 0U;
 
 /* MIT: tau = kp*(pos_des-pos) + kd*(vel_des-vel) + tau_ff -> mapped to iq. */
@@ -407,7 +407,7 @@ class ApplicationController {
   float applied_position_vel_limit_ = 100.0f;
   float applied_position_isep_ = 0.35f;
   float applied_trajectory_accel_ = 1000.0f;
-  float applied_max_modulation_ = 0.90f;
+  float applied_max_modulation_ = DEVICE_MAX_MOD_DEFAULT;
   uint8_t applied_decoupling_enable_ = 0U;
   float speed_ref_applied_rad_s_ = 0.0f;
   float active_velocity_ref_rad_s_ = 0.0f;
@@ -1335,7 +1335,7 @@ void ApplicationController::ApplyIdentResultIfReady() {
 namespace {
 
 constexpr const char *kFirmwareName = "DR4310";
-constexpr const char *kFirmwareVersion = "3.1.0";
+constexpr const char *kFirmwareVersion = "3.1.1";
 
 /* Index order is the default VOFA map. Slots 0..15 stay the historical frame.
  * 28 OlBudget is optional; the default 16-channel map does not include it.

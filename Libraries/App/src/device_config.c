@@ -76,6 +76,9 @@ static const ParamDef kParams[] = {
   {PINFO("OL_EN", 0.0f, 1.0f, 1U, 0U, NULL), P_VAR_F32, CFG_OFF(ol_en), &control_ol_en, NULL, 0U},
   {PINFO("OL_IQ", 0.0f, IQ_HARD_MAX_A, 0U, 0U, NULL), P_VAR_F32, CFG_OFF(ol_iq), &control_ol_iq_a, NULL, 0U},
   {PINFO("OL_TIME_S", 0.0f, OL_TIME_MAX_S, 0U, 0U, NULL), P_VAR_F32, CFG_OFF(ol_time_s), &control_ol_time_s, NULL, 0U},
+  /* Appended last so existing GET order is unchanged. The float reuses
+   * ol_reserved[4]; a stored 0 is not a legal ratio and is repaired on load. */
+  {PINFO("MAX_MOD", DEVICE_MAX_MOD_MIN, DEVICE_MAX_MOD_MAX, 0U, 0U, NULL), P_VAR_F32, CFG_OFF(ol_reserved), &control_max_modulation, NULL, 0U},
 };
 #define PARAM_COUNT (sizeof(kParams) / sizeof(kParams[0]))
 
@@ -262,6 +265,20 @@ static void apply_legacy_overload(DeviceConfigData *cfg) {
   memset(cfg->ol_reserved, 0, sizeof(cfg->ol_reserved));
 }
 
+/* ol_reserved held zeros in every image written before MAX_MOD. 0 is outside
+ * 0.5..0.99, so leaving it would make Validate reject the whole config.
+ * Repair 0, non-finite, and out-of-range values to the default before that
+ * check. In-range values are kept. Applies to v1..v3 (after the memset above)
+ * and to existing v4 images. */
+static void sanitize_max_mod(DeviceConfigData *cfg) {
+  float v = 0.0f;
+  memcpy(&v, cfg->ol_reserved, sizeof(v));
+  if (!isfinite(v) || (v < DEVICE_MAX_MOD_MIN) || (v > DEVICE_MAX_MOD_MAX)) {
+    v = DEVICE_MAX_MOD_DEFAULT;
+    memcpy(cfg->ol_reserved, &v, sizeof(v));
+  }
+}
+
 static void sanitize_telem(DeviceConfigData *cfg) {
   uint32_t period = 0U;
   if ((cfg->telem_hz < 10U) ||
@@ -324,6 +341,7 @@ static DeviceConfigSource load_from_flash(void) {
   }
   sanitize_telem(&image.config);
   clamp_vbus_window(&image.config);
+  sanitize_max_mod(&image.config);
   if (!DeviceConfig_Validate(&image.config)) {
     DeviceConfig_Apply(&g_defaults);
     return DEVCFG_SRC_INVALID;

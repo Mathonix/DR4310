@@ -103,9 +103,12 @@
 !/Libraries/Safety/inc/FaultManager.hpp
 !/Libraries/Safety/src/FaultManager.cpp
 
-# Host-side overload limiter test. Other tests stay local.
+# Host-side tests that compile without hardware.
 !/tests/
+!/tests/stubs/
+!/tests/stubs/stm32g4xx_hal.h
 !/tests/test_overload_limiter.cpp
+!/tests/test_uart_config.c
 
 # Required CMSIS and HAL dependencies with licenses
 !/Drivers/CMSIS/Device/ST/STM32G4xx/Include/stm32g431xx.h

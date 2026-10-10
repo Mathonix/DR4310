@@ -15,6 +15,8 @@
  *   v4, 168 bytes: v3 plus overload mode (OL_EN, OL_IQ, OL_TIME_S). v1..v3
  *                  still decode. Their overload bytes stay zero; device_config
  *                  then sets OL_EN=0, OL_IQ=IQ_LIM and OL_TIME_S to the default.
+ *                  From 3.1.1 the last 4 bytes (ol_reserved) hold MAX_MOD as a
+ *                  float. Length and version stay v4. 0 means unset.
  */
 
 #include <stddef.h>
@@ -105,7 +107,7 @@ typedef struct {
   float ol_en;             /* 0 or 1 */
   float ol_iq;             /* A, >= iq_limit, <= IQ_HARD_MAX_A */
   float ol_time_s;         /* s, 0..10. 0 disables overload */
-  uint8_t ol_reserved[4];
+  uint8_t ol_reserved[4]; /* MAX_MOD float since 3.1.1; 0 means unset */
 } DeviceConfigData;
 
 typedef struct {

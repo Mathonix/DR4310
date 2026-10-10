@@ -710,7 +710,9 @@ static void MX_TIM1_Init(void)
   /*
    * CH4 is not routed to a pin. Small CCR produces OC4REF near the PWM valley
    * once per full up-down period (with RCR=1), used only as ADC sample strobe.
-   * Pulse = 80 ≈ 1.9% of ARR — mid-valley sample, clear of high-side edges.
+   * Pulse = 80 is ~471 ns before the valley. Phase current is inline
+   * (R12/R13), so this strobe does not need a low-side conduction window.
+   * At kDutyMax 0.995 the phase edges stay ~24 us away from the strobe.
    */
   sConfigOC.Pulse = 80;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)

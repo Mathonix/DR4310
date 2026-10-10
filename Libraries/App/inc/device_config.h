@@ -12,6 +12,8 @@
  *   v1 (calibration only) and v2 records still load: calibration is kept and
  *   every v3 field takes its compile-time default. v3 records load with
  *   OL_EN=0, OL_IQ=the stored IQ_LIM and OL_TIME_S at its compile-time default.
+ * - MAX_MOD lives in the v4 record's ol_reserved[4] as a float. Length and
+ *   version stay v4. A stored 0 (older images) loads as DEVICE_MAX_MOD_DEFAULT.
  */
 
 #include <stddef.h>
@@ -43,6 +45,10 @@ extern "C" {
 #define DEVICE_VBUS_HARD_MAX_V 40.0f
 #define DEVICE_VBUS_MIN_PARAM_MAX_V (DEVICE_VBUS_HARD_MAX_V - 1.0f)
 #define DEVICE_DEFAULT_RS_OHM 1.97f
+/* Voltage-circle ratio, vmax = MAX_MOD * Vbus / sqrt(3). Stored in ol_reserved. */
+#define DEVICE_MAX_MOD_MIN 0.5f
+#define DEVICE_MAX_MOD_MAX 0.99f
+#define DEVICE_MAX_MOD_DEFAULT 0.99f
 #define DEVICE_DEFAULT_LS_H 0.005f
 #define DEVICE_DEFAULT_KT 0.0f
 #define DEVICE_TELEM_SLOTS 16U

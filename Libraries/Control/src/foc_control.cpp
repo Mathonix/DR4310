@@ -12,14 +12,21 @@ namespace {
 
 constexpr float kSqrt3 = 1.73205080757f;
 constexpr float kMinBusV = 6.0f;
-constexpr float kDefaultMaxModulation = 0.90f;
+constexpr float kDefaultMaxModulation = 0.99f;
 constexpr float kDefaultIqLimitA = 2.50f;
 constexpr float kDefaultCurrentKp = 12.0f;
 constexpr float kDefaultCurrentKi = 1500.0f;
 /* 0 => no extra PI voltage clamp; use max_mod * Vbus / sqrt(3) only. */
 constexpr float kDefaultCurrentOutLimitV = 0.0f;
 constexpr float kDutyMin = 0.02f;
-constexpr float kDutyMax = 0.98f;
+/* Vertex duty is 0.5 + m/2, so m = 0.99 asks for 0.995.
+ * PWM1 centers the high pulse on the valley. A higher duty moves both
+ * edges farther from the CH4 strobe (CCR 80, ~0.47 us before the valley).
+ * At 0.995 the nearer edge is still ~24 us away, far outside the ADC
+ * aperture. kDutyMin stays 0.02: that phase's edge is already only a few
+ * counts from the strobe, and the shunts are inline so this floor is about
+ * edge noise, not a low-side conduction window. */
+constexpr float kDutyMax = 0.995f;
 /* DRV8313 peak hard trip (instant, ISR), separate from configured Iq work limit.
  * Do not raise this to follow OL_IQ. IQ_HARD_MAX_A stays strictly below it. */
 constexpr float kOvercurrentTripA = 3.50f;
