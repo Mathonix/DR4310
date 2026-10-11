@@ -1,0 +1,13 @@
+import { launchBrowser } from "./browser.mjs";
+const url = process.argv[2];
+const b = await launchBrowser();
+const p = await b.newPage(); const errs=[]; p.on("pageerror", e=>errs.push(e.message));
+await p.goto(url, { waitUntil: "networkidle0" });
+await p.evaluate(() => localStorage.clear()); await p.emulateMediaFeatures([{name:"prefers-color-scheme",value:"dark"}]); await p.reload({ waitUntil: "networkidle0" });
+const th = () => p.evaluate(() => document.documentElement.dataset.theme);
+const a = await th(); await p.click("#themeToggle"); await new Promise(r=>setTimeout(r,600)); const c = await th();
+await p.reload({ waitUntil: "networkidle0" }); const d = await th();
+const bg = await p.evaluate(() => getComputedStyle(document.body).backgroundColor);
+const es = await p.$eval("#estop", e => getComputedStyle(e).position);
+console.log(a==="dark"&&c==="light"&&d==="light" ? "PASS theme default dark → toggle light → persisted" : `FAIL ${a} ${c} ${d}`, bg, "estop", es, errs.length ? errs : "no errors");
+await b.close();

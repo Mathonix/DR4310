@@ -79,7 +79,12 @@ python tools/calibrate_motor.py --serial-port COM5 --jlink-serial 29534567 --out
 | `docs/` | UART、CAN 与上位机调试协议 |
 | `tests/` | 不依赖硬件的控制及配置回归测试 |
 | `tools/` | 编译、烧录、校准与串口/SWD/CAN 工具 |
+| `upper/` | Cloudflare DR4310 上位机源码、构建配置和测试 |
 | `startup_stm32g431xx.s` | 中断向量和启动代码 |
 | `STM32G431XX_FLASH.ld` | Flash/RAM 布局 |
 
 `.gitignore` 使用逐文件白名单。源码、协议、测试和选定工具纳入版本控制；构建产物、虚拟环境、日志、Flash 备份及本地配置保持忽略。新增编译依赖时，需要显式更新白名单并验证全新检出能独立编译。
+
+上位机源码位于 [upper/](upper/README.md)。在该目录执行 `npm ci`、`npm run build:client`、`npm run typecheck` 即可安装依赖、生成浏览器包并检查类型；Cloudflare 部署配置为 `upper/wrangler.jsonc`。
+
+GitHub Pages 上位机：<https://mathonix.github.io/DR4310/>。`npm run build:pages` 可生成静态站点，`main` 上的上位机源码更新由 `.github/workflows/pages.yml` 自动构建、测试和发布。

@@ -1,0 +1,12 @@
+{
+  "name": "dr4310-233688",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-08",
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "dr4310.233688.xyz",
+      "custom_domain": true
+    }
+  ]
+}

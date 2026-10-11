@@ -1,0 +1,7 @@
+node_modules/
+dist/
+src/client-bundle.ts
+.wrangler/
+screenshots/
+.env*
+.dev.vars*

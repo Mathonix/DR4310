@@ -37,6 +37,9 @@
 !/tools/
 
 # Build and repository files
+!/.github/
+!/.github/workflows/
+!/.github/workflows/pages.yml
 !/.gitignore
 !/CMakeLists.txt
 !/CMakePresets.json
@@ -129,6 +132,25 @@
 !/tools/observe_zero_current.py
 !/tools/can_motor_control.py
 !/tools/can_motor_gui.py
+
+# Cloudflare DR4310 browser host source and tests.
+!/upper/
+!/upper/.gitignore
+!/upper/package.json
+!/upper/package-lock.json
+!/upper/tsconfig.json
+!/upper/tsconfig.client.json
+!/upper/wrangler.jsonc
+!/upper/*.md
+!/upper/src/
+!/upper/src/*.ts
+/upper/src/client-bundle.ts
+!/upper/scripts/
+!/upper/scripts/*.mjs
+!/upper/test/
+!/upper/test/*.ts
+!/upper/test/e2e/
+!/upper/test/e2e/*.mjs
 
 # Required CMSIS and HAL dependencies with licenses
 !/Drivers/CMSIS/Device/ST/STM32G4xx/Include/stm32g431xx.h
