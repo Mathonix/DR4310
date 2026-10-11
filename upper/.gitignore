@@ -5,3 +5,8 @@ src/client-bundle.ts
 screenshots/
 .env*
 .dev.vars*
+test/
+DESIGN_PLAN.md
+REVIEW.md
+POSITION_FIX_*.md
+scripts/preview.mjs

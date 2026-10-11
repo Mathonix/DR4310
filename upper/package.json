@@ -7,7 +7,6 @@
     "build:client": "node scripts/build-client.mjs",
     "build:pages": "node scripts/build-pages.mjs",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
-    "test": "vitest run --pool=threads",
     "deploy": "npm run build:client && wrangler deploy",
     "dev": "npm run build:client && wrangler dev"
   },
@@ -17,7 +16,6 @@
     "@types/w3c-web-usb": "^1.0.14",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.3",
     "wrangler": "^4.149.0"
   }
 }
