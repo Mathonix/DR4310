@@ -51,7 +51,6 @@ constexpr uint16_t kBusOkSettleMs = 50U;
 constexpr float kOpenLoopRampRadS2 = 1000.0f;
 constexpr float kCurrentTestRampAS = 10000.0f;
 constexpr float kSpeedRefRampRadS2 = 10000.0f;
-constexpr float kCurrentLoopOmegaC = 1200.0f;
 constexpr float kRpmToRadS = 0.10471975512f;
 constexpr float kRadSToRpm = 1.0f / kRpmToRadS;
 /* 上电后自动进入速度闭环，并以该转速启动；改这里即可改默认目标转速。 */
@@ -98,14 +97,14 @@ constexpr size_t kVofaRxRingBytes = 256U;
 constexpr size_t kVofaCommandMaxBytes = 192U;
 constexpr size_t kUartMaxTokens = 20U;
 constexpr uint32_t kRebootDrainTimeoutMs = 300U;
-constexpr float kUartSpeedLimitRpm = 500.0f;
+constexpr float kUartSpeedLimitRpm = 1000.0f;
 constexpr float kUartPositionLimitRad = 500.0f;
 constexpr float kMitPMax = 50.0f;
 constexpr float kMitVMax = 50.0f;
 constexpr float kMitKpMax = 500.0f;
 constexpr float kMitKdMax = 5.0f;
 constexpr float kVofaCurrentKpMax = 20.0f;
-constexpr float kVofaCurrentKiMax = 2500.0f;
+constexpr float kVofaCurrentKiMax = 20000.0f;
 constexpr float kCalibAlignVoltageV = 1.20f;
 constexpr float kCalibDirVoltageV = 0.72f;
 constexpr uint16_t kCalibDirHoldMs = 120U;
@@ -243,6 +242,7 @@ volatile float control_position_kp = 3.5f;
 volatile float control_position_ki = 1.2f;
 volatile float control_position_kd = 2.6f;
 volatile float control_position_velocity_limit_rad_s = 100.0f;
+volatile float control_position_velocity_ff_gain = DEVICE_POS_VFF_DEFAULT;
 volatile float control_position_i_sep_rad = 0.35f;
 volatile float control_open_loop_voltage_v = app::kOpenLoopModMax;
 
@@ -250,10 +250,10 @@ volatile float control_current_test_iq_ref_a = 0.0f;
 volatile float control_current_test_angle_rad = 0.0f;
 volatile float control_align_angle_rad = 0.0f;
 volatile float control_align_voltage_v = 0.6f;
-volatile float control_current_pi_kp = 12.0f;
-volatile float control_current_pi_ki = 1500.0f;
+volatile float control_current_pi_kp = control::motor_params::kDefaultCurrentKp;
+volatile float control_current_pi_ki = control::motor_params::kDefaultCurrentKi;
 volatile float control_current_pi_out_limit_v = 0.0f;
-volatile float control_current_pi_kaw = 0.5f;
+volatile float control_current_pi_kaw = control::motor_params::kDefaultCurrentKaw;
 volatile float control_iq_limit_a = IQ_CONTINUOUS_MAX_A;
 /* Overload defaults: off, ceiling equal to the continuous limit, 2 s budget.
  * DeviceConfig_Init captures these into the v1/default image. */
@@ -390,10 +390,10 @@ class ApplicationController {
   float open_loop_electrical_angle_rad_ = 0.0f;
   float open_loop_velocity_rad_s_ = 0.0f;
   float current_test_iq_ref_a_ = 0.0f;
-  float applied_current_pi_kp_ = 12.0f;
-  float applied_current_pi_ki_ = 1500.0f;
+  float applied_current_pi_kp_ = control::motor_params::kDefaultCurrentKp;
+  float applied_current_pi_ki_ = control::motor_params::kDefaultCurrentKi;
   float applied_current_pi_out_limit_v_ = 0.0f;
-  float applied_current_pi_kaw_ = 0.5f;
+  float applied_current_pi_kaw_ = control::motor_params::kDefaultCurrentKaw;
   float applied_iq_limit_a_ = 0.0f;
   /* -1 forces the first 1 kHz tick to publish the speed-loop ceiling. */
   float applied_speed_ceiling_a_ = -1.0f;
@@ -407,6 +407,7 @@ class ApplicationController {
   float applied_position_vel_limit_ = 100.0f;
   float applied_position_isep_ = 0.35f;
   float applied_trajectory_accel_ = 1000.0f;
+  float applied_trajectory_velocity_limit_ = 100.0f;
   float applied_max_modulation_ = DEVICE_MAX_MOD_DEFAULT;
   uint8_t applied_decoupling_enable_ = 0U;
   float speed_ref_applied_rad_s_ = 0.0f;
@@ -1187,6 +1188,7 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
                        : 1000.0f);
   applied_trajectory_accel_ =
       (control_accel_ref_rad_s2 > 0.1f) ? control_accel_ref_rad_s2 : 1000.0f;
+  applied_trajectory_velocity_limit_ = control_position_velocity_limit_rad_s;
   applied_position_kp_ = control_position_kp;
   applied_position_ki_ = control_position_ki;
   applied_position_kd_ = control_position_kd;
@@ -1314,16 +1316,22 @@ void ApplicationController::ApplyIdentResultIfReady() {
   applied_ls_h_ = control_ls_h;
   float kp = 0.0f;
   float ki = 0.0f;
-  (void)control::motor_params::getCurrentPi(identifier_.GetResult(),
-                                            kCurrentLoopOmegaC,
-                                            kp,
-                                            ki);
+  (void)control::motor_params::getCurrentPi(
+      identifier_.GetResult(),
+      control::motor_params::kCurrentLoopOmegaCRadS,
+      kp,
+      ki);
   control_current_pi_kp = kp;
   control_current_pi_ki = ki;
   foc_.SetCurrentPi(kp, ki, control_current_pi_out_limit_v);
   applied_current_pi_kp_ = kp;
   applied_current_pi_ki_ = ki;
   applied_current_pi_out_limit_v_ = control_current_pi_out_limit_v;
+  const float kaw =
+      (kp > 0.05f) ? (ki / kp) : control::motor_params::kDefaultCurrentKaw;
+  control_current_pi_kaw = kaw;
+  foc_.SetCurrentKaw(kaw);
+  applied_current_pi_kaw_ = kaw;
   control_decoupling_enable = 1U;
   foc_.SetDecouplingEnable(1U);
   applied_decoupling_enable_ = 1U;
@@ -1335,7 +1343,7 @@ void ApplicationController::ApplyIdentResultIfReady() {
 namespace {
 
 constexpr const char *kFirmwareName = "DR4310";
-constexpr const char *kFirmwareVersion = "3.1.1";
+constexpr const char *kFirmwareVersion = "3.2.0";
 
 /* Index order is the default VOFA map. Slots 0..15 stay the historical frame.
  * 28 OlBudget is optional; the default 16-channel map does not include it.
@@ -2438,7 +2446,8 @@ void ApplicationController::Update() {
                                     mech_vel,
                                     kControlDtS);
     active_velocity_ref_rad_s_ =
-        Clamp(position_vel_cmd + traj.velocity_rad_s,
+        Clamp(position_vel_cmd +
+                  Clamp(control_position_velocity_ff_gain, 0.0f, 1.0f) * traj.velocity_rad_s,
               -control_position_velocity_limit_rad_s,
               control_position_velocity_limit_rad_s);
     speed_controller_.setReference(active_velocity_ref_rad_s_);
@@ -2536,8 +2545,10 @@ void ApplicationController::Update() {
 
   const float trajectory_accel =
       (control_accel_ref_rad_s2 > 0.1f) ? control_accel_ref_rad_s2 : 1000.0f;
-  if (trajectory_accel != applied_trajectory_accel_) {
+  if ((trajectory_accel != applied_trajectory_accel_) ||
+      (control_position_velocity_limit_rad_s != applied_trajectory_velocity_limit_)) {
     applied_trajectory_accel_ = trajectory_accel;
+    applied_trajectory_velocity_limit_ = control_position_velocity_limit_rad_s;
     trajectory_.setLimits(control_position_velocity_limit_rad_s,
                           trajectory_accel);
   }

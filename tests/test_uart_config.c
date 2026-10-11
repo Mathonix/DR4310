@@ -12,12 +12,13 @@
 #include "store_record.h"
 
 /* ---- stubs for device_config.c dependencies ---- */
-volatile float control_current_pi_kp = 12.0f, control_current_pi_ki = 1500.0f,
+volatile float control_current_pi_kp = 6.0f, control_current_pi_ki = 6816.0f,
                control_current_pi_out_limit_v = 0.0f, control_iq_limit_a = 2.5f,
                control_speed_pi_kp = 0.25f, control_speed_pi_ki = 0.02f, control_speed_pi_kd = 0.0f,
                control_accel_ref_rad_s2 = 0.0f, control_position_kp = 3.5f, control_position_ki = 1.2f,
                control_position_kd = 2.6f, control_position_i_sep_rad = 0.35f,
-               control_position_velocity_limit_rad_s = 100.0f, control_mit_kp = 10.0f,
+               control_position_velocity_limit_rad_s = 100.0f,
+               control_position_velocity_ff_gain = DEVICE_POS_VFF_DEFAULT, control_mit_kp = 10.0f,
                control_mit_kd = 0.5f, control_electrical_zero_rad = 0.12578f,
                control_vbus_min_v = DEVICE_DEFAULT_VBUS_MIN_V,
                control_vbus_max_v = DEVICE_DEFAULT_VBUS_MAX_V,
@@ -38,7 +39,7 @@ int StoreImage_Load(StoreImage *image) {
 int StoreImage_Save(const StoreImage *image, uint32_t *seq) {
   StoreImage prev;
   uint32_t s = StoreImage_Load(&prev) ? prev.sequence + 1U : 1U;
-  if (StoreRecord_Encode(image, s, g_flash, sizeof(g_flash)) != STORE_RECORD_V4_BYTES) return 0;
+  if (StoreRecord_Encode(image, s, g_flash, sizeof(g_flash)) != STORE_RECORD_V5_BYTES) return 0;
   g_flash_valid = 1;
   g_saves++;
   if (seq) *seq = s;
@@ -112,16 +113,18 @@ int main(void) {
   { float v; assert(Ascii_ParseFloat("1e3", &v) && v == 1000.0f);
     assert(!Ascii_ParseFloat("12x", &v)); assert(!Ascii_ParseFloat("", &v)); assert(!Ascii_ParseFloat("inf", &v)); }
 
-  /* ---- store record: v1 compat, v2 round trip, corruption ---- */
+  /* ---- store record: v1 compat, v5 round trip, corruption ---- */
   put_v1(0.5f, 1, 7);
   { StoreImage im; assert(StoreRecord_Decode(g_flash, sizeof(g_flash), &im));
-    assert(im.version == 1 && im.calib_valid && !im.config_valid && im.sequence == 7 && im.electrical_zero_rad == 0.5f); }
-  { StoreImage im; memset(&im, 0, sizeof(im)); uint8_t buf[STORE_RECORD_V4_BYTES];
+    assert(im.version == 1 && im.calib_valid && !im.config_valid && im.sequence == 7 && im.electrical_zero_rad == 0.5f);
+    assert(im.config.pos_vff == 1.0f); }
+  { StoreImage im; memset(&im, 0, sizeof(im)); uint8_t buf[STORE_RECORD_V5_BYTES];
     im.calib_valid = 1; im.electrical_zero_rad = 1.0f; im.encoder_direction = 0; im.config_valid = 1; im.config.can_id = 5;
     im.config.spd_kp = 0.3f; im.config.pole_pairs = 14; im.config.can_baud = 1000000U;
-    assert(StoreRecord_Encode(&im, 9, buf, sizeof(buf)) == STORE_RECORD_V4_BYTES);
+    assert(StoreRecord_Encode(&im, 9, buf, sizeof(buf)) == STORE_RECORD_V5_BYTES);
     StoreImage out; assert(StoreRecord_Decode(buf, sizeof(buf), &out));
-    assert(out.version == 4 && out.sequence == 9 && out.config.can_id == 5 && out.config.spd_kp == 0.3f && out.calib_valid);
+    assert(out.version == 5 && out.sequence == 9 && out.config.can_id == 5 && out.config.spd_kp == 0.3f && out.calib_valid);
+    assert(out.config.pos_vff == 0.0f);
     assert(out.config.pole_pairs == 14 && out.config.can_baud == 1000000U);
     buf[40] ^= 1; assert(!StoreRecord_Decode(buf, sizeof(buf), &out));
     im.electrical_zero_rad = 7.0f; assert(StoreRecord_Encode(&im, 1, buf, sizeof(buf)) == 0); }
@@ -131,7 +134,7 @@ int main(void) {
   DeviceConfig_Init();
   assert(DeviceConfig_Source() == DEVCFG_SRC_FLASH_V1);
   assert(DeviceConfig_ActiveCanId() == MOTOR_CAN_ID && DeviceConfig_Live()->telemetry == 1);
-  assert(DeviceConfig_ParamCount() == 38);
+  assert(DeviceConfig_ParamCount() == 39);
   assert(control_max_modulation == DEVICE_MAX_MOD_DEFAULT);
   assert(control_ol_en == 0.0f);
   assert(control_ol_iq_a == IQ_CONTINUOUS_MAX_A);
@@ -368,6 +371,7 @@ int main(void) {
     assert(control_ol_time_s == OL_TIME_DEFAULT_S);
     StoreImage decoded; assert(StoreImage_Load(&decoded));
     assert(decoded.version == 2 && decoded.calib_valid && decoded.electrical_zero_rad == 0.25f);
+    assert(decoded.config.pos_vff == 1.0f && control_position_velocity_ff_gain == 1.0f);
     assert(decoded.encoder_direction == 0);
   }
 
@@ -386,7 +390,7 @@ int main(void) {
     assert(DeviceConfig_Source() == DEVCFG_SRC_INVALID);
     assert(DeviceConfig_ActiveCanId() == MOTOR_CAN_ID);
     StoreImage decoded; assert(StoreImage_Load(&decoded));
-    assert(decoded.calib_valid && decoded.electrical_zero_rad == 0.4f && decoded.version == 4);
+    assert(decoded.calib_valid && decoded.electrical_zero_rad == 0.4f && decoded.version == 5);
   }
 
   /* Old 0 V / 60 V (and a min above the new 39 V cap) load clamped, not invalid. */
@@ -434,7 +438,7 @@ int main(void) {
   {
     StoreImage raw; assert(StoreRecord_Decode(g_flash, sizeof(g_flash), &raw));
     assert(raw.version == 3 && raw.config.iq_limit == 1.5f && raw.config.ol_en == 0.0f);
-    assert(raw.config.ol_iq == 0.0f && raw.config.ol_time_s == 0.0f);
+    assert(raw.config.ol_iq == 0.0f && raw.config.ol_time_s == 0.0f && raw.config.pos_vff == 1.0f);
   }
   control_iq_limit_a = 9.0f; control_ol_en = 1.0f; control_ol_iq_a = 9.0f; control_ol_time_s = 9.0f;
   control_max_modulation = 0.5f;
@@ -471,7 +475,7 @@ int main(void) {
   control_rs_ohm = DEVICE_DEFAULT_RS_OHM; control_ls_h = DEVICE_DEFAULT_LS_H;
   DeviceConfig_Init();
   assert(DeviceConfig_Source() == DEVCFG_SRC_DEFAULT);
-  assert(DeviceConfig_ParamCount() == 38);
+  assert(DeviceConfig_ParamCount() == 39);
   {
     const int iq = DeviceConfig_FindParam("IQ_LIM");
     const int en = DeviceConfig_FindParam("OL_EN");
@@ -512,12 +516,12 @@ int main(void) {
     assert(DeviceConfig_FirstInvalidParam() == -1);
   }
 
-  /* MAX_MOD is last. 0 / NaN / out of range in ol_reserved load as 0.99.
+  /* MAX_MOD precedes POS_VFF. 0 / NaN / out of range in ol_reserved load as 0.99.
    * An in-range value round-trips. SET enforces 0.5..0.99. */
   {
     const int mod = DeviceConfig_FindParam("MAX_MOD");
     const int tm = DeviceConfig_FindParam("OL_TIME_S");
-    assert(mod == (int)DeviceConfig_ParamCount() - 1);
+    assert(mod == (int)DeviceConfig_ParamCount() - 2);
     assert(tm >= 0 && mod > tm);
     assert(DeviceConfig_ParamInfo((size_t)mod)->min == DEVICE_MAX_MOD_MIN);
     assert(DeviceConfig_ParamInfo((size_t)mod)->max == DEVICE_MAX_MOD_MAX);
@@ -537,7 +541,7 @@ int main(void) {
     im.config = *DeviceConfig_Live();
     im.config.rs_ohm = 1.97f;
     memset(im.config.ol_reserved, 0, sizeof(im.config.ol_reserved));
-    assert(StoreRecord_Encode(&im, 4, g_flash, sizeof(g_flash)) == STORE_RECORD_V4_BYTES);
+    assert(StoreRecord_Encode(&im, 4, g_flash, sizeof(g_flash)) == STORE_RECORD_V5_BYTES);
     g_flash_valid = 1;
     control_max_modulation = 0.5f;
     control_rs_ohm = 1.0f;
@@ -549,7 +553,7 @@ int main(void) {
     float stored = 0.80f;
     im.config = *DeviceConfig_Live();
     memcpy(im.config.ol_reserved, &stored, sizeof(stored));
-    assert(StoreRecord_Encode(&im, 5, g_flash, sizeof(g_flash)) == STORE_RECORD_V4_BYTES);
+    assert(StoreRecord_Encode(&im, 5, g_flash, sizeof(g_flash)) == STORE_RECORD_V5_BYTES);
     control_max_modulation = DEVICE_MAX_MOD_DEFAULT;
     DeviceConfig_Init();
     assert(DeviceConfig_Source() == DEVCFG_SRC_FLASH);
@@ -557,17 +561,97 @@ int main(void) {
 
     stored = 1.5f;
     memcpy(im.config.ol_reserved, &stored, sizeof(stored));
-    assert(StoreRecord_Encode(&im, 6, g_flash, sizeof(g_flash)) == STORE_RECORD_V4_BYTES);
+    assert(StoreRecord_Encode(&im, 6, g_flash, sizeof(g_flash)) == STORE_RECORD_V5_BYTES);
     DeviceConfig_Init();
     assert(DeviceConfig_Source() == DEVCFG_SRC_FLASH);
     assert(control_max_modulation == DEVICE_MAX_MOD_DEFAULT);
 
     stored = nanf("");
     memcpy(im.config.ol_reserved, &stored, sizeof(stored));
-    assert(StoreRecord_Encode(&im, 7, g_flash, sizeof(g_flash)) == STORE_RECORD_V4_BYTES);
+    assert(StoreRecord_Encode(&im, 7, g_flash, sizeof(g_flash)) == STORE_RECORD_V5_BYTES);
     DeviceConfig_Init();
     assert(DeviceConfig_Source() == DEVCFG_SRC_FLASH);
     assert(control_max_modulation == DEVICE_MAX_MOD_DEFAULT);
+  }
+
+  /* v4 migration retains the complete old prefix and calibration. The
+   * decoder's default also survives calibration-only re-encoding as v5. */
+  {
+    StoreImage legacy, decoded;
+    memset(&legacy, 0, sizeof(legacy));
+    DeviceConfig_Capture(&legacy.config);
+    legacy.config.pos_vff = 0.0f; /* Must not leak into the shorter v4 prefix. */
+    legacy.config_valid = 1; legacy.calib_valid = 1;
+    legacy.electrical_zero_rad = 0.75f; legacy.encoder_direction = 1;
+    legacy.config.pos_kp = 8.0f; legacy.config.telem_ch[15] = 22;
+    float mod = 0.8f;
+    memcpy(legacy.config.ol_reserved, &mod, 4);
+    uint8_t v4[STORE_RECORD_V4_BYTES] = {0};
+    const uint32_t magic = STORE_RECORD_MAGIC, seq4 = 42;
+    const uint16_t version4 = STORE_RECORD_V4, size4 = STORE_RECORD_V4_BYTES;
+    memcpy(v4, &magic, 4); memcpy(v4 + 4, &version4, 2); memcpy(v4 + 6, &size4, 2);
+    memcpy(v4 + 8, &seq4, 4); memcpy(v4 + 12, &legacy.electrical_zero_rad, 4);
+    v4[16] = 1; v4[17] = 1; v4[18] = 1;
+    memcpy(v4 + 20, &legacy.config, 144);
+    const uint32_t crc4 = StoreRecord_Crc32(v4, 164);
+    memcpy(v4 + 164, &crc4, 4);
+    assert(StoreRecord_Decode(v4, sizeof(v4), &decoded));
+    assert(decoded.version == 4 && decoded.config.pos_vff == 1.0f);
+    assert(decoded.calib_valid && decoded.electrical_zero_rad == 0.75f);
+    assert(!memcmp(&decoded.config, &legacy.config, 144));
+    memset(g_flash, 0xFF, sizeof(g_flash)); memcpy(g_flash, v4, sizeof(v4));
+    g_flash_valid = 1; control_position_velocity_ff_gain = 0.0f;
+    DeviceConfig_Init();
+    assert(DeviceConfig_Source() == DEVCFG_SRC_FLASH);
+    assert(control_position_velocity_ff_gain == 1.0f && control_position_kp == 8.0f);
+    assert(control_max_modulation == 0.8f && DeviceConfig_Live()->telem_ch[15] == 22);
+    assert(StoreRecord_Encode(&decoded, 43, g_flash, sizeof(v4)) == 0);
+    assert(StoreRecord_Encode(&decoded, 43, g_flash, sizeof(g_flash)) == STORE_RECORD_V5_BYTES);
+    assert(StoreImage_Load(&decoded) && decoded.version == 5 && decoded.config.pos_vff == 1.0f);
+  }
+
+  /* POS_VFF: RAM writes are immediate; SAVE/boot preserves both 0 and 0.5.
+   * Invalid v5 values reject the configuration rather than enabling FF. */
+  {
+    const int ff = DeviceConfig_FindParam("POS_VFF");
+    assert(ff == (int)DeviceConfig_ParamCount() - 1);
+    assert(DeviceConfig_ParamInfo((size_t)ff)->min == 0.0f);
+    assert(DeviceConfig_ParamInfo((size_t)ff)->max == 1.0f);
+    assert(DeviceConfig_SetParam((size_t)ff, -0.01f) == DEVCFG_ERR_RANGE);
+    assert(DeviceConfig_SetParam((size_t)ff, 1.01f) == DEVCFG_ERR_RANGE);
+    assert(DeviceConfig_SetParam((size_t)ff, NAN) == DEVCFG_ERR_RANGE);
+    assert(DeviceConfig_SetParam((size_t)ff, INFINITY) == DEVCFG_ERR_RANGE);
+    const float gains[] = {0.0f, 0.5f, 1.0f};
+    for (size_t i = 0; i < sizeof(gains) / sizeof(gains[0]); ++i) {
+      assert(DeviceConfig_SetParam((size_t)ff, gains[i]) == DEVCFG_OK);
+      assert(control_position_velocity_ff_gain == gains[i]);
+      assert(DeviceConfig_GetParam((size_t)ff) == gains[i]);
+      assert(DeviceConfig_Live()->pos_vff == gains[i]);
+      assert(DeviceConfig_Save(NULL));
+      control_position_velocity_ff_gain = DEVICE_POS_VFF_DEFAULT;
+      DeviceConfig_Init();
+      assert(DeviceConfig_Source() == DEVCFG_SRC_FLASH);
+      assert(control_position_velocity_ff_gain == gains[i]);
+      DeviceConfig_RestoreDefaults();
+      assert(control_position_velocity_ff_gain == DEVICE_POS_VFF_DEFAULT);
+      assert(DeviceConfig_Reload() == DEVCFG_SRC_FLASH);
+      assert(control_position_velocity_ff_gain == gains[i]);
+    }
+    StoreImage im;
+    assert(StoreImage_Load(&im));
+    im.config.pos_vff = 0.5f;
+    memset(im.config.pos_reserved, 0xFF, sizeof(im.config.pos_reserved));
+    assert(StoreRecord_Encode(&im, 99, g_flash, sizeof(g_flash)) == STORE_RECORD_V5_BYTES);
+    assert(StoreImage_Load(&im) && im.config.pos_vff == 0.5f);
+    for (size_t i = 0; i < sizeof(im.config.pos_reserved); ++i) assert(im.config.pos_reserved[i] == 0);
+    g_flash[164] ^= 1; /* New field is covered by CRC. */
+    assert(!StoreImage_Load(&im));
+    im.config.pos_vff = 2.0f;
+    assert(StoreRecord_Encode(&im, 100, g_flash, sizeof(g_flash)) == STORE_RECORD_V5_BYTES);
+    control_position_velocity_ff_gain = DEVICE_POS_VFF_DEFAULT;
+    DeviceConfig_Init();
+    assert(DeviceConfig_Source() == DEVCFG_SRC_INVALID);
+    assert(control_position_velocity_ff_gain == DEVICE_POS_VFF_DEFAULT);
   }
 
   printf("test_uart_config: all passed (%zu params)\n", DeviceConfig_ParamCount());

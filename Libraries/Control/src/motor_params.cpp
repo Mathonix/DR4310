@@ -4,14 +4,15 @@
 
 namespace control::motor_params {
 
-/* Seeded from J-Link identification (2026-07-11):
- * Rs~1.97 ohm, raw L~19.7mH (likely upper-bound), flux~0.0069Wb.
- * L is stored derated for safer PI synthesis.
- */
-constexpr float kDefaultRsOhm = 1.97f;
-constexpr float kDefaultLh = 5.0e-3f;
 constexpr float kDefaultFluxWb = 0.00693f;
 constexpr float kDefaultPolePairs = 14.0f;
+
+static_assert(kCurrentLoopOmegaCRadS * kDefaultLh == kDefaultCurrentKp,
+              "current Kp must be wc * L");
+static_assert(kCurrentLoopOmegaCRadS * kDefaultRsOhm == kDefaultCurrentKi,
+              "current Ki must be wc * R");
+static_assert(kDefaultRsOhm / kDefaultLh == kDefaultCurrentKaw,
+              "current Kaw must be R / L");
 
 constexpr float kMinOmegaRadS = 100.0f;
 constexpr float kMinLh = 1.0e-6f;
@@ -21,7 +22,8 @@ constexpr float kMaxRsOhm = 10.0f;
 constexpr float kMinKp = 0.5f;
 constexpr float kMaxKp = 20.0f;
 constexpr float kMinKi = 50.0f;
-constexpr float kMaxKi = 2500.0f;
+/* 1200 rad/s at the 10 ohm Rs clamp is 12000. 20000 stays under CUR_KI. */
+constexpr float kMaxKi = 20000.0f;
 
 void setDefaults(MotorParams &params) {
   params.rs_ohm = kDefaultRsOhm;

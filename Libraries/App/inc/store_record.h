@@ -17,6 +17,8 @@
  *                  then sets OL_EN=0, OL_IQ=IQ_LIM and OL_TIME_S to the default.
  *                  From 3.1.1 the last 4 bytes (ol_reserved) hold MAX_MOD as a
  *                  float. Length and version stay v4. 0 means unset.
+ *   v5, 176 bytes: v4 plus POS_VFF (0..1) and 4 reserved bytes. Older
+ *                  records decode with POS_VFF=1; v5 preserves an explicit 0.
  */
 
 #include <stddef.h>
@@ -31,11 +33,13 @@ extern "C" {
 #define STORE_RECORD_V2 2U
 #define STORE_RECORD_V3 3U
 #define STORE_RECORD_V4 4U
+#define STORE_RECORD_V5 5U
 #define STORE_RECORD_V1_BYTES 24U
 #define STORE_RECORD_V2_BYTES 96U
 #define STORE_RECORD_V3_BYTES 152U
 #define STORE_RECORD_V4_BYTES 168U
-#define STORE_RECORD_MAX_BYTES STORE_RECORD_V4_BYTES
+#define STORE_RECORD_V5_BYTES 176U
+#define STORE_RECORD_MAX_BYTES STORE_RECORD_V5_BYTES
 
 /* First 72 bytes are the v2 config image. Do not reorder or insert fields. */
 typedef struct {
@@ -63,7 +67,7 @@ typedef struct {
   float mit_kd;
 } DeviceConfigV2;
 
-/* 128 bytes. v3 extension starts at offset 72. */
+/* 152 bytes. v3/v4/v5 extensions start at offsets 72/128/144. */
 typedef struct {
   uint8_t can_id;
   uint8_t boot_mode;
@@ -108,6 +112,9 @@ typedef struct {
   float ol_iq;             /* A, >= iq_limit, <= IQ_HARD_MAX_A */
   float ol_time_s;         /* s, 0..10. 0 disables overload */
   uint8_t ol_reserved[4]; /* MAX_MOD float since 3.1.1; 0 means unset */
+  /* v5 extension. The v4 prefix remains exactly 144 bytes. */
+  float pos_vff;           /* position trajectory velocity feedforward gain, 0..1 */
+  uint8_t pos_reserved[4];
 } DeviceConfigData;
 
 typedef struct {
@@ -121,10 +128,11 @@ typedef struct {
 } StoreImage;
 
 uint32_t StoreRecord_Crc32(const uint8_t *data, size_t length);
-/* Returns 1 if buf holds a valid v1, v2, v3, or v4 record; fills *out.
- * v1/v2 leave the v3 extension zeroed. v1..v3 leave the v4 overload bytes zero. */
+/* Returns 1 if buf holds a valid v1..v5 record; fills *out.
+ * v1/v2 leave the v3 extension zeroed. v1..v3 leave the v4 overload bytes zero.
+ * v1..v4 default pos_vff to 1, including calibration-only record rewrites. */
 int StoreRecord_Decode(const uint8_t *buf, size_t len, StoreImage *out);
-/* Always writes a v4 record of STORE_RECORD_V4_BYTES. Returns bytes written or 0. */
+/* Always writes a v5 record of STORE_RECORD_V5_BYTES. Returns bytes written or 0. */
 size_t StoreRecord_Encode(const StoreImage *in, uint32_t sequence,
                           uint8_t *buf, size_t len);
 

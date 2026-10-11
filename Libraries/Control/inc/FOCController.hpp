@@ -103,6 +103,7 @@ class FocController {
   float iq_limit_ = 2.50f;
   volatile float min_bus_v_ = 6.0f;
   float pi_out_limit_v_ = 0.0f;
+  float pi_kaw_ = motor_params::kDefaultCurrentKaw;
   float cached_vmax_ = 0.0f;
   uint8_t vmax_div_ = 0U;
   uint8_t angle_direct_enable_ = 0U;

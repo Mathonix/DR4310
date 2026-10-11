@@ -108,7 +108,7 @@ typedef struct
 /* Accept window for a CAN current command. The live clamp is the overload
  * limiter, which never exceeds this value. MIT packed iq_ff stays MIT_T_*. */
 #define CAN_CURRENT_LIMIT_A     IQ_HARD_MAX_A
-#define CAN_SPEED_LIMIT_RPM     500.0f
+#define CAN_SPEED_LIMIT_RPM     1000.0f
 #define CAN_POSITION_LIMIT_RAD  500.0f
 /* Cheetah-style MIT packed ranges (shared with host tools). */
 #define MIT_P_MIN               (-50.0f)

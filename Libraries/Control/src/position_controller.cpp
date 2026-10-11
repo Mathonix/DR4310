@@ -34,6 +34,7 @@ void PositionController::setGains(float kp,
   ki_ = ki;
   kd_ = kd;
   integral_sep_ = std::max(integral_separation, 0.0f);
+  if (ki_ <= 0.0f) integrator_ = 0.0f;
 }
 
 void PositionController::setVelocityLimit(float velocity_limit) {

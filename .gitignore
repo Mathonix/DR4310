@@ -1,4 +1,4 @@
-# Public repository: only files needed to build the GCC firmware.
+# Public repository: firmware, protocols, tests and selected development tools.
 # New files stay local until explicitly added to this allowlist.
 # Keep third-party license files alongside the retained components.
 *
@@ -33,12 +33,18 @@
 !/Libraries/Safety/src/
 !/cmake/
 !/cmake/stm32cubemx/
+!/docs/
+!/tools/
 
 # Build and repository files
 !/.gitignore
 !/CMakeLists.txt
 !/CMakePresets.json
 !/README.md
+!/requirements-tools.txt
+!/POSITION_VFF_20261011.md
+!/FLASH_TEST_20261011.md
+!/NEW_MOTOR_FLASH_TEST_20261011.md
 !/STM32G431XX_FLASH.ld
 !/cmake/gcc-arm-none-eabi.cmake
 !/cmake/stm32cubemx/CMakeLists.txt
@@ -109,6 +115,20 @@
 !/tests/stubs/stm32g4xx_hal.h
 !/tests/test_overload_limiter.cpp
 !/tests/test_uart_config.c
+!/tests/test_position_control.py
+
+# Protocol documentation and reproducible build / calibration tooling.
+!/docs/UART_PROTOCOL.md
+!/docs/CAN_USAGE.md
+!/docs/GM6020_CAN_PROTOCOL.md
+!/docs/VOFA_CURRENT_LOOP_COMMANDS.md
+!/tools/__init__.py
+!/tools/build_flash_motor.py
+!/tools/calibrate_motor.py
+!/tools/position_hardware_test.py
+!/tools/observe_zero_current.py
+!/tools/can_motor_control.py
+!/tools/can_motor_gui.py
 
 # Required CMSIS and HAL dependencies with licenses
 !/Drivers/CMSIS/Device/ST/STM32G4xx/Include/stm32g431xx.h

@@ -27,9 +27,9 @@
  *      part trips there; a typical part is higher). 2.80 A stays 0.20 A
  *      under that minimum so the driver's own nFAULT is not the current
  *      limit. Do not raise this to 3.00 A.
- *   4. Stator copper loss uses Rs = 1.97 ohm (motor_params.cpp). For this
- *      Clarke scaling, Pcu = 1.5 * Rs * Iq^2: about 18.5 W at 2.50 A and
- *      23.2 W at 2.80 A. The extra heat is only allowed for OL_TIME_S.
+ *   4. Stator copper loss uses Rs = 5.68 ohm (MotorParams.hpp). For this
+ *      Clarke scaling, Pcu = 1.5 * Rs * Iq^2: about 53.3 W at 2.50 A and
+ *      66.8 W at 2.80 A. The extra heat is only allowed for OL_TIME_S.
  *   5. GM6020 command full scale is +/-3.0 A (gm6020_can.c). Commands above
  *      2.80 A are clamped here before the limiter runs.
  *

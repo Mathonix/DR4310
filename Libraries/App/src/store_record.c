@@ -55,16 +55,32 @@ typedef struct {
   uint8_t calib_valid;
   uint8_t config_valid;
   uint8_t reserved;
-  DeviceConfigData config;
+  uint8_t config[144];
   uint32_t crc32;
 } RecordV4;
 
+typedef struct {
+  uint32_t magic;
+  uint16_t version;
+  uint16_t size;
+  uint32_t sequence;
+  float electrical_zero_rad;
+  uint8_t encoder_direction;
+  uint8_t calib_valid;
+  uint8_t config_valid;
+  uint8_t reserved;
+  DeviceConfigData config;
+  uint32_t crc32;
+} RecordV5;
+
 typedef char DeviceConfigV2MustBe72Bytes[(sizeof(DeviceConfigV2) == 72U) ? 1 : -1];
-typedef char DeviceConfigMustBe144Bytes[(sizeof(DeviceConfigData) == 144U) ? 1 : -1];
+typedef char DeviceConfigMustBe152Bytes[(sizeof(DeviceConfigData) == 152U) ? 1 : -1];
 typedef char V3ExtStartsAt72[(offsetof(DeviceConfigData, pole_pairs) == 72U) ? 1 : -1];
 typedef char V3BaudAt100[(offsetof(DeviceConfigData, can_baud) == 100U) ? 1 : -1];
 typedef char V3ChannelsAt112[(offsetof(DeviceConfigData, telem_ch) == 112U) ? 1 : -1];
 typedef char V4OverloadAt128[(offsetof(DeviceConfigData, ol_en) == 128U) ? 1 : -1];
+typedef char V4MaxModAt140[(offsetof(DeviceConfigData, ol_reserved) == 140U) ? 1 : -1];
+typedef char V5PositionVffAt144[(offsetof(DeviceConfigData, pos_vff) == 144U) ? 1 : -1];
 typedef char V2PrefixMatches[(offsetof(DeviceConfigData, mit_kd) == offsetof(DeviceConfigV2, mit_kd)) ? 1 : -1];
 typedef char RecordV1MustBe24Bytes[(sizeof(RecordV1) == STORE_RECORD_V1_BYTES) ? 1 : -1];
 typedef char RecordV2MustBe96Bytes[(sizeof(RecordV2) == STORE_RECORD_V2_BYTES) ? 1 : -1];
@@ -72,6 +88,8 @@ typedef char RecordV3MustBe152Bytes[(sizeof(RecordV3) == STORE_RECORD_V3_BYTES) 
 typedef char RecordV3DoubleWordAligned[((sizeof(RecordV3) % 8U) == 0U) ? 1 : -1];
 typedef char RecordV4MustBe168Bytes[(sizeof(RecordV4) == STORE_RECORD_V4_BYTES) ? 1 : -1];
 typedef char RecordV4DoubleWordAligned[((sizeof(RecordV4) % 8U) == 0U) ? 1 : -1];
+typedef char RecordV5MustBe176Bytes[(sizeof(RecordV5) == STORE_RECORD_V5_BYTES) ? 1 : -1];
+typedef char RecordV5DoubleWordAligned[((sizeof(RecordV5) % 8U) == 0U) ? 1 : -1];
 
 uint32_t StoreRecord_Crc32(const uint8_t *data, size_t length) {
   uint32_t crc = 0xFFFFFFFFUL;
@@ -91,6 +109,9 @@ static int calib_ok(float zero, uint8_t dir) {
 
 static void image_clear(StoreImage *out) {
   memset(out, 0, sizeof(*out));
+  /* Legacy images had unconditional velocity feedforward. Set this before
+   * copying their shorter prefixes so calibration-only saves also migrate. */
+  out->config.pos_vff = 1.0f;
 }
 
 int StoreRecord_Decode(const uint8_t *buf, size_t len, StoreImage *out) {
@@ -176,6 +197,25 @@ int StoreRecord_Decode(const uint8_t *buf, size_t len, StoreImage *out) {
     out->config_valid = r.config_valid;
     out->electrical_zero_rad = r.electrical_zero_rad;
     out->encoder_direction = r.encoder_direction;
+    memcpy(&out->config, r.config, sizeof(r.config));
+    return 1;
+  }
+  if ((version == STORE_RECORD_V5) && (size == STORE_RECORD_V5_BYTES) &&
+      (len >= STORE_RECORD_V5_BYTES)) {
+    RecordV5 r;
+    memcpy(&r, buf, sizeof(r));
+    if ((r.crc32 != StoreRecord_Crc32((const uint8_t *)&r, offsetof(RecordV5, crc32))) ||
+        (r.calib_valid > 1U) || (r.config_valid > 1U) ||
+        ((r.calib_valid != 0U) && !calib_ok(r.electrical_zero_rad, r.encoder_direction))) {
+      return 0;
+    }
+    image_clear(out);
+    out->version = STORE_RECORD_V5;
+    out->sequence = r.sequence;
+    out->calib_valid = r.calib_valid;
+    out->config_valid = r.config_valid;
+    out->electrical_zero_rad = r.electrical_zero_rad;
+    out->encoder_direction = r.encoder_direction;
     out->config = r.config;
     return 1;
   }
@@ -184,7 +224,7 @@ int StoreRecord_Decode(const uint8_t *buf, size_t len, StoreImage *out) {
 
 size_t StoreRecord_Encode(const StoreImage *in, uint32_t sequence,
                           uint8_t *buf, size_t len) {
-  RecordV4 r;
+  RecordV5 r;
   if ((in == NULL) || (buf == NULL) || (len < sizeof(r))) {
     return 0U;
   }
@@ -193,7 +233,7 @@ size_t StoreRecord_Encode(const StoreImage *in, uint32_t sequence,
   }
   memset(&r, 0, sizeof(r));
   r.magic = STORE_RECORD_MAGIC;
-  r.version = STORE_RECORD_V4;
+  r.version = STORE_RECORD_V5;
   r.size = (uint16_t)sizeof(r);
   r.sequence = sequence;
   r.electrical_zero_rad = in->electrical_zero_rad;
@@ -203,7 +243,8 @@ size_t StoreRecord_Encode(const StoreImage *in, uint32_t sequence,
   r.config = in->config;
   r.config.zero_valid = (in->config.zero_valid != 0U) ? 1U : 0U;
   r.config.ol_en = (in->config.ol_en != 0.0f) ? 1.0f : 0.0f;
-  r.crc32 = StoreRecord_Crc32((const uint8_t *)&r, offsetof(RecordV4, crc32));
+  memset(r.config.pos_reserved, 0, sizeof(r.config.pos_reserved));
+  r.crc32 = StoreRecord_Crc32((const uint8_t *)&r, offsetof(RecordV5, crc32));
   memcpy(buf, &r, sizeof(r));
   return sizeof(r);
 }

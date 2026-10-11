@@ -14,8 +14,6 @@ constexpr float kSqrt3 = 1.73205080757f;
 constexpr float kMinBusV = 6.0f;
 constexpr float kDefaultMaxModulation = 0.99f;
 constexpr float kDefaultIqLimitA = 2.50f;
-constexpr float kDefaultCurrentKp = 12.0f;
-constexpr float kDefaultCurrentKi = 1500.0f;
 /* 0 => no extra PI voltage clamp; use max_mod * Vbus / sqrt(3) only. */
 constexpr float kDefaultCurrentOutLimitV = 0.0f;
 constexpr float kDutyMin = 0.02f;
@@ -175,8 +173,8 @@ void FocController::Init(TIM_HandleTypeDef *htim) {
   state_.overcurrent_trip_count = 0U;
   vmax_div_ = 0U;
   angle_direct_enable_ = 0U;
-  SetCurrentPi(kDefaultCurrentKp,
-               kDefaultCurrentKi,
+  SetCurrentPi(motor_params::kDefaultCurrentKp,
+               motor_params::kDefaultCurrentKi,
                kDefaultCurrentOutLimitV);
   Enable(0U);
 }
@@ -223,10 +221,14 @@ void FocController::SetCurrentPi(float kp, float ki, float out_limit_v) {
     cached_vmax_ = 50.0f;
     current_loop_.init(kp, ki, -50.0f, 50.0f);
   }
+  /* init() clears the back-calculation gain. Put the last Kaw back so a
+   * live Kp/Ki write does not disable anti-windup. */
+  current_loop_.setBackCalculationGain(pi_kaw_);
 }
 
 void FocController::SetCurrentKaw(float kaw) {
-  current_loop_.setBackCalculationGain(kaw);
+  pi_kaw_ = kaw;
+  current_loop_.setBackCalculationGain(pi_kaw_);
 }
 
 void FocController::SetMotorParams(const MotorParams &params) {

@@ -40,7 +40,7 @@ static const float kCanBaudChoices[] = {
 static const ParamDef kParams[] = {
   {PINFO("CAN_ID", 1.0f, 7.0f, 1U, 1U, NULL), P_CFG_U8, CFG_OFF(can_id), NULL, NULL, 0U},
   {PINFO("BOOT_MODE", 0.0f, 3.0f, 1U, 1U, NULL), P_CFG_U8, CFG_OFF(boot_mode), NULL, NULL, 0U},
-  {PINFO("BOOT_TARGET", -500.0f, 500.0f, 0U, 1U, NULL), P_CFG_F32, CFG_OFF(boot_target), NULL, NULL, 0U},
+  {PINFO("BOOT_TARGET", -1000.0f, 1000.0f, 0U, 1U, NULL), P_CFG_F32, CFG_OFF(boot_target), NULL, NULL, 0U},
   {PINFO("BOOT_AE", 0.0f, 1.0f, 1U, 1U, NULL), P_CFG_U8, CFG_OFF(boot_auto_enable), NULL, NULL, 0U},
   {PINFO("TELEM", 0.0f, 1.0f, 1U, 0U, NULL), P_CFG_U8, CFG_OFF(telemetry), NULL, NULL, 0U},
   {PINFO("TIMEOUT_MS", 0.0f, 60000.0f, 1U, 0U, NULL), P_CFG_U16, CFG_OFF(cmd_timeout_ms), NULL, NULL, 0U},
@@ -79,6 +79,7 @@ static const ParamDef kParams[] = {
   /* Appended last so existing GET order is unchanged. The float reuses
    * ol_reserved[4]; a stored 0 is not a legal ratio and is repaired on load. */
   {PINFO("MAX_MOD", DEVICE_MAX_MOD_MIN, DEVICE_MAX_MOD_MAX, 0U, 0U, NULL), P_VAR_F32, CFG_OFF(ol_reserved), &control_max_modulation, NULL, 0U},
+  {PINFO("POS_VFF", 0.0f, 1.0f, 0U, 0U, NULL), P_VAR_F32, CFG_OFF(pos_vff), &control_position_velocity_ff_gain, NULL, 0U},
 };
 #define PARAM_COUNT (sizeof(kParams) / sizeof(kParams[0]))
 
@@ -221,6 +222,7 @@ void DeviceConfig_Capture(DeviceConfigData *cfg) {
     }
   }
   cfg->reserved0 = 0U;
+  memset(cfg->pos_reserved, 0, sizeof(cfg->pos_reserved));
 }
 
 void DeviceConfig_Apply(const DeviceConfigData *cfg) {
@@ -338,6 +340,9 @@ static DeviceConfigSource load_from_flash(void) {
   }
   if (image.version < STORE_RECORD_V4) {
     apply_legacy_overload(&image.config);
+  }
+  if (image.version < STORE_RECORD_V5) {
+    image.config.pos_vff = DEVICE_POS_VFF_DEFAULT;
   }
   sanitize_telem(&image.config);
   clamp_vbus_window(&image.config);

@@ -145,6 +145,7 @@ extern volatile float control_position_kp;
 extern volatile float control_position_ki;
 extern volatile float control_position_kd;
 extern volatile float control_position_velocity_limit_rad_s;
+extern volatile float control_position_velocity_ff_gain;
 extern volatile float control_position_i_sep_rad; /* |err| above this: freeze I (integral separation) */
 extern volatile float control_open_loop_voltage_v;
 extern volatile float control_current_test_iq_ref_a;
