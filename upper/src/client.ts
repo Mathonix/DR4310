@@ -30,6 +30,8 @@ let pcan: PcanUsbDevice | null = null;
 let busOn = false;
 const serial = new SerialLink();
 let activeAudioSession: AudioSession | null = null;
+let audioPreparing = false;
+let audioPrepareAbort = false;
 let audioUi: ReturnType<typeof initAudioUI> | null = null;
 const savedId = Number(readStored("dr4310.motorId") ?? 1);
 let motorId = Number.isInteger(savedId) && savedId >= 1 && savedId <= 7 ? savedId : 1;
@@ -230,7 +232,7 @@ function idsText(): string {
 }
 
 async function sendCan(id: number, data: Uint8Array, note: string, safety = false, valid: () => boolean = () => true): Promise<boolean> {
-  if (activeAudioSession && !safety) { toast("AUDIO 独占期间禁止 CAN 电机控制", "err"); return false; }
+  if ((activeAudioSession || audioPreparing) && !safety) { toast("AUDIO 占用期间禁止 CAN 电机控制", "err"); return false; }
   const epoch = controlEpoch;
   const allowed = () => valid() && (safety || (epoch === controlEpoch && !stopTask && !emergencyTask && !switchingNode));
   if (!allowed()) return false;
@@ -393,7 +395,7 @@ async function gmTick(): Promise<void> {
   } finally { gmBusy = false; }
 }
 function startGmLoop(): void {
-  if (activeAudioSession) { toast("AUDIO 播放期间禁止 GM 电流控制", "err"); return; }
+  if (activeAudioSession || audioPreparing) { toast("AUDIO 播放期间禁止 GM 电流控制", "err"); return; }
   if (stopTask || emergencyTask || switchingNode) return;
   void dash.halt("", false);
   controlEpoch++; pcan?.cancelPending();
@@ -536,7 +538,7 @@ async function serDisconnect(sendStop = true): Promise<void> {
 }
 async function serSend(line: string, note = "", safety = false): Promise<boolean> {
   const epoch = controlEpoch;
-  if (activeAudioSession) { if (!safety) toast("AUDIO 独占，其他串口命令已禁止", "err"); return false; }
+  if (activeAudioSession || audioPreparing) { if (!safety) toast("AUDIO 独占，其他串口命令已禁止", "err"); return false; }
   if (!safety && line.trim() !== "STOP" && (stopTask || emergencyTask || switchingNode)) return false;
   if (!serial.connected) { toast("串口未连接", "err"); return false; }
   try {
@@ -550,7 +552,10 @@ async function serSend(line: string, note = "", safety = false): Promise<boolean
 
 // ---------------- AUDIO V1 ----------------
 async function audioStart(file: AudioInput, axis: "Q" | "D", ampMa: number): Promise<void> {
-  if (activeAudioSession) throw new Error("已有 AUDIO 会话");
+  if (activeAudioSession || audioPreparing) throw new Error("已有 AUDIO 会话正在准备或播放");
+  audioPreparing = true;
+  audioPrepareAbort = false;
+  try {
   if (!serial.connected || serial.baudRate !== 230400)
     throw new Error("AUDIO V1 必须通过 230400 8N1 Web Serial 连接");
   if (cfg.fw !== "v2") throw new Error("固件未识别，不支持 AUDIO V1");
@@ -565,6 +570,7 @@ async function audioStart(file: AudioInput, axis: "Q" | "D", ampMa: number): Pro
   if (!confirm("即将向电机注入音频电流。请确认电机已固定、空载，外部硬件急停可靠、无其他 CAN 主机控制，首次使用建议 20 mA 和 300 Hz 测试。\n\n启动 AUDIO？"))
     throw new Error("用户取消音频启动");
   await safeStop("AUDIO 启动前安全停机");
+  if (audioPrepareAbort) throw new Error("AUDIO 准备期间收到停止/急停，已取消启动");
   if (!serial.connected || activeAudioSession) throw new Error("安全停机期间串口断开或 AUDIO 已启动");
   cancelControl("AUDIO 独占接管");
   cfg.setAudioExclusive(true);
@@ -586,6 +592,7 @@ async function audioStart(file: AudioInput, axis: "Q" | "D", ampMa: number): Pro
     if (activeAudioSession === session) await session.stop("启动失败");
     throw e;
   }
+  } finally { audioPreparing = false; }
 }
 
 // ---------------- Safety ----------------
@@ -602,6 +609,7 @@ function cancelControl(reason: string): boolean {
   return gmWas;
 }
 function safeStop(reason: string): Promise<void> {
+  if (audioPreparing && reason !== "AUDIO 启动前安全停机") audioPrepareAbort = true;
   if (stopTask) return stopTask;
   if (emergencyTask) return emergencyTask;
   const gmWas = cancelControl(reason);
@@ -860,7 +868,7 @@ function meas(selected: Route = route("auto")): Meas {
   });
 }
 function route(pref: "auto" | "can" | "serial") {
-  if (activeAudioSession) return null;
+  if (activeAudioSession || audioPreparing) return null;
   if (stopTask || emergencyTask || switchingNode) return null;
   const canOk = !!pcan && busOn && !canBusOff;
   const ser = serial.connected ? (cfg.fw === "v2" ? "serial" : cfg.fw === "legacy" ? "legacy" : null) : null;
