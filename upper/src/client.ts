@@ -297,7 +297,7 @@ function onCanFrame(f: CanFrame): void {
     if (!st) return;
     rate.st++;
     lastStatus = st; lastStatusT = now;
-    if (st.faults && (canDriving || aeActive() || dash.running || gmTimer || mitTimer || gainTimers.spd || gainTimers.pos)) void safeStop("CAN 故障");
+    if (st.faults && (activeAudioSession || canDriving || aeActive() || dash.running || gmTimer || mitTimer || gainTimers.spd || gainTimers.pos)) void safeStop("CAN 故障");
     if (st.mode === 0) lastVbus = { v: st.primary, t: now };
     chRpm.push(S.rpmSt!, now, st.rpm);
     chPrim.push(S.prim!, now, st.primary);
@@ -316,7 +316,7 @@ function onBusStatus(b: BusStats, text?: string): void {
   $("stPcanBus").textContent = "1 Mbps · " + parts.join(" · ");
   $("dotPcan").className = "dot " + (b.busOff || b.busHeavy ? "warn" : "on");
   if (text && b.busOff) toast(text, "err");
-  if ((b.busOff || text?.startsWith("读取中断")) && (canDriving || aeActive() || dash.running || gmTimer || mitTimer || gainTimers.spd || gainTimers.pos)) void safeStop("CAN 链路异常");
+  if ((b.busOff || text?.startsWith("读取中断")) && (activeAudioSession || canDriving || aeActive() || dash.running || gmTimer || mitTimer || gainTimers.spd || gainTimers.pos)) void safeStop("CAN 链路异常");
 }
 
 async function pcanConnect(): Promise<void> {
@@ -1287,7 +1287,7 @@ function init(): void {
   cfg.init((reason) => safeStop(reason));
   setInterval(() => {
     const now = performance.now();
-    if (canDriving && now - canDrivingT > 1500 && !meas("can").fresh || serialDriving && now - serialDrivingT > 2500 && !meas("serial").fresh) void safeStop("反馈中断");
+    if (!activeAudioSession && (canDriving && now - canDrivingT > 1500 && !meas("can").fresh || serialDriving && now - serialDrivingT > 2500 && !meas("serial").fresh)) void safeStop("反馈中断");
   }, 100);
   cfg.refreshUi();
   initTheme(() => Object.values(charts).forEach((c) => c.markDirty()));
