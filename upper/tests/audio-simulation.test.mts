@@ -117,6 +117,7 @@ test("virtual MCU complete session, ACK, PAUSE, RESUME, END, FINISHED, EXIT and 
       } else emit();
     },
     async abortAudio(wire: Uint8Array) { await this.writeBytes(wire); },
+    async writePriorityAudioControl(wire: Uint8Array, _type: number) { await this.writeBytes(wire); },
   };
   session = new AudioSession(mock, audio, 1, () => {}, safe => { released = safe; });
   await session.start("Q", 20);
