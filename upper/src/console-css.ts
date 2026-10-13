@@ -343,6 +343,7 @@ table.cfgparams td { border: 0; padding: 0; min-width: 0; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
 
+#tabs { flex-wrap:wrap; }
 .audio-ui .audio-form { display:flex; flex-direction:column; gap:10px; }
 .audio-ui .audio-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
 .audio-ui .audio-fields>div { display:flex; flex-direction:column; gap:5px; }
