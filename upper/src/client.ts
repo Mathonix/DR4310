@@ -1,5 +1,8 @@
 import { PcanUsbDevice, webUsbFilters, type CanFrame, type BusStats } from "./pcan";
 import { SerialLink } from "./serial";
+import { AudioSession } from "./audio-session";
+import { initAudioUI } from "./audio-ui";
+import type { AudioInput } from "./audio-file";
 import { StripChart, PALETTE } from "./chart";
 import { createUartCfg } from "./uartcfg";
 import { createDashboard, type DMode, type Meas, type Route } from "./dashboard";
@@ -26,6 +29,8 @@ const num = (id: string) => Number(($(id) as HTMLInputElement).value);
 let pcan: PcanUsbDevice | null = null;
 let busOn = false;
 const serial = new SerialLink();
+let activeAudioSession: AudioSession | null = null;
+let audioUi: ReturnType<typeof initAudioUI> | null = null;
 const savedId = Number(readStored("dr4310.motorId") ?? 1);
 let motorId = Number.isInteger(savedId) && savedId >= 1 && savedId <= 7 ? savedId : 1;
 let controlEpoch = 0;
@@ -225,6 +230,7 @@ function idsText(): string {
 }
 
 async function sendCan(id: number, data: Uint8Array, note: string, safety = false, valid: () => boolean = () => true): Promise<boolean> {
+  if (activeAudioSession && !safety) { toast("AUDIO 独占期间禁止 CAN 电机控制", "err"); return false; }
   const epoch = controlEpoch;
   const allowed = () => valid() && (safety || (epoch === controlEpoch && !stopTask && !emergencyTask && !switchingNode));
   if (!allowed()) return false;
@@ -466,7 +472,7 @@ function onUartChannels(defs: ChannelDef[]): void {
 }
 function onFault(sn: FaultSnapshot): void {
   if (sn.code) {
-    if (serialDriving || canDriving || aeActive() || dash.running || gmTimer || mitTimer || gainTimers.spd || gainTimers.pos) void safeStop("串口故障");
+    if (activeAudioSession || serialDriving || canDriving || aeActive() || dash.running || gmTimer || mitTimer || gainTimers.spd || gainTimers.pos) void safeStop("串口故障");
     toast(`故障 0x${sn.code.toString(16)} ${sn.names.join(",") || decodeFaults(sn.code).join("、")}`, "err");
   }
 }
@@ -496,8 +502,8 @@ async function serConnect(port?: SerialPort): Promise<void> {
   if (serial.connected) return;
   // Handlers first: the read loop starts inside open().
   cfg.prepare();
-  serial.onData = (c) => cfg.onData(c);
-  serial.onClose = (r) => { void safeStop("串口断开"); lastUart = null; serUi(false); cfg.onClosed(); autoEnable.forget("serial"); void serial.close(); toast("串口已断开：" + r, "err"); };
+  serial.onData = (c) => { if (activeAudioSession) activeAudioSession.onData(c); else cfg.onData(c); };
+  serial.onClose = (r) => { activeAudioSession?.disconnected(r); void safeStop("串口断开"); lastUart = null; serUi(false); cfg.onClosed(); autoEnable.forget("serial"); void serial.close(); toast("串口已断开：" + r, "err"); };
   try {
     const baud = Number($<HTMLSelectElement>("serBaud").value);
     if (port) await serial.openPort(port, baud); else await serial.open(baud);
@@ -509,12 +515,14 @@ async function serConnect(port?: SerialPort): Promise<void> {
   serUi(true);
   toast("串口已连接，正在识别固件…", "ok");
   await cfg.onOpened();
+  audioUi?.refresh();
 }
 function serUi(on: boolean): void {
   $("dotSer").className = "dot" + (on ? " on" : "");
   $("stSer").textContent = on ? `已连接 · ${$<HTMLSelectElement>("serBaud").value} 8N1` : "未连接";
   $("serConnect").toggleAttribute("disabled", on);
   $("serDisconnect").toggleAttribute("disabled", !on);
+  audioUi?.refresh();
 }
 async function serDisconnect(sendStop = true): Promise<void> {
   if (sendStop && serial.connected) await safeStop("断开串口");
@@ -523,9 +531,11 @@ async function serDisconnect(sendStop = true): Promise<void> {
   cfg.onClosed();
   autoEnable.forget("serial");
   lastUart = null;
+  audioUi?.refresh();
 }
 async function serSend(line: string, note = "", safety = false): Promise<boolean> {
   const epoch = controlEpoch;
+  if (activeAudioSession) { if (!safety) toast("AUDIO 独占，其他串口命令已禁止", "err"); return false; }
   if (!safety && line.trim() !== "STOP" && (stopTask || emergencyTask || switchingNode)) return false;
   if (!serial.connected) { toast("串口未连接", "err"); return false; }
   try {
@@ -535,6 +545,46 @@ async function serSend(line: string, note = "", safety = false): Promise<boolean
     recRow("tx", "uart", [line.trim()]);
     return true;
   } catch (e) { toast("串口发送失败：" + errMsg(e), "err"); return false; }
+}
+
+// ---------------- AUDIO V1 ----------------
+async function audioStart(file: AudioInput, axis: "Q" | "D", ampMa: number): Promise<void> {
+  if (activeAudioSession) throw new Error("已有 AUDIO 会话");
+  if (!serial.connected || $<HTMLSelectElement>("serBaud").value !== "230400")
+    throw new Error("AUDIO V1 必须通过 230400 8N1 Web Serial 连接");
+  if (cfg.fw !== "v2") throw new Error("固件未识别，不支持 AUDIO V1");
+  if (!Number.isInteger(ampMa) || ampMa < 1 || ampMa > 200) throw new Error("峰值幅度必须是 1..200mA 的整数");
+  // Do not interpret the legacy INFO baud=CAN_BAUD as USART speed.
+  const response = await cfg.request("INFO\n", { note: "AUDIO 能力检测", timeout: 850 });
+  const kv = response.reply?.type === "INFO" ? response.reply.kv : null;
+  if (!response.ok || kv?.audio !== "1" || kv.uart_baud !== "230400")
+    throw new Error("固件不支持 AUDIO V1（INFO 必须包含 audio=1 uart_baud=230400）");
+  if (kv.fault && parseInt(kv.fault, 16)) throw new Error("固件存在故障锁存，拒绝开启音频");
+  const previousTelem = kv.telem === "1" ? 1 : 0;
+  if (!confirm("即将向电机注入音频电流。请确认电机已固定、空载，外部硬件急停可靠、无其他 CAN 主机控制，首次使用建议 20 mA 和 300 Hz 测试。\n\n启动 AUDIO？"))
+    throw new Error("用户取消音频启动");
+  await safeStop("AUDIO 启动前安全停机");
+  if (!serial.connected || activeAudioSession) throw new Error("安全停机期间串口断开或 AUDIO 已启动");
+  cancelControl("AUDIO 独占接管");
+  cfg.setAudioExclusive(true);
+  let session: AudioSession;
+  session = new AudioSession(serial, file, previousTelem,
+    (snapshot) => audioUi?.update(snapshot),
+    (safe) => {
+      if (activeAudioSession === session) activeAudioSession = null;
+      if (safe) cfg.setAudioExclusive(false);
+      else {
+        toast("AUDIO 退出未经确认，停机状态未知；请使用硬件急停", "err");
+        void serial.close();
+      }
+      audioUi?.released();
+    });
+  activeAudioSession = session;
+  try { await session.start(axis, ampMa); }
+  catch (e) {
+    if (activeAudioSession === session) await session.stop("启动失败");
+    throw e;
+  }
 }
 
 // ---------------- Safety ----------------
@@ -569,6 +619,7 @@ function safeStop(reason: string): Promise<void> {
   return stopTask;
 }
 async function stopSerial(reason: string): Promise<boolean> {
+  if (activeAudioSession) return activeAudioSession.stop(reason);
   if (!serial.connected) return false;
   const result = await stopSerialWithAe(async (line) => {
     // AE 0 is written raw (serial writes stay ordered, so it still precedes STOP on the wire) and is not
@@ -808,6 +859,7 @@ function meas(selected: Route = route("auto")): Meas {
   });
 }
 function route(pref: "auto" | "can" | "serial") {
+  if (activeAudioSession) return null;
   if (stopTask || emergencyTask || switchingNode) return null;
   const canOk = !!pcan && busOn && !canBusOff;
   const ser = serial.connected ? (cfg.fw === "v2" ? "serial" : cfg.fw === "legacy" ? "legacy" : null) : null;
@@ -1017,6 +1069,7 @@ function init(): void {
   $("views").addEventListener("click", (e) => {
     const b = (e.target as HTMLElement).closest("button[data-view]") as HTMLButtonElement | null;
     if (!b) return;
+    if (activeAudioSession) void safeStop("切换页面，停止 AUDIO");
     document.querySelectorAll("#views button").forEach((x) => x.classList.toggle("active", x === b));
     document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + b.dataset.view));
     b.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -1135,6 +1188,16 @@ function init(): void {
   $("gmStop").addEventListener("click", () => stopGmLoop(true));
   $("gmZero").addEventListener("click", () => { const f = encodeGmCurrent(motorId, 0); void sendCan(f.id, f.data, "GM 零帧"); });
 
+  // AUDIO UI
+  audioUi = initAudioUI({
+    start: audioStart,
+    pause: () => activeAudioSession?.pause() ?? Promise.resolve(),
+    resume: () => activeAudioSession?.resume() ?? Promise.resolve(),
+    stop: () => safeStop("电机音乐停止"),
+    connected: () => serial.connected,
+    firmware: () => cfg.fw === "v2" ? "固件已识别 · AUDIO V1 需 INFO 探测" : "旧固件 / 未识别",
+  });
+
   // UART
   document.querySelectorAll<HTMLButtonElement>("button[data-u]").forEach((b) =>
     b.addEventListener("click", () => { if (b.dataset.u === "STOP") void safeStop("串口停止"); else void serSend(asciiCommand(b.dataset.u!)); }));
@@ -1189,9 +1252,11 @@ function init(): void {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "hidden") return;
     dash.stopWave();
-    if (($("wdHidden") as HTMLInputElement).checked) void safeStop("页面隐藏");
+    if (activeAudioSession || ($("wdHidden") as HTMLInputElement).checked) void safeStop("页面隐藏");
   });
-  window.addEventListener("pagehide", () => { if (($("wdHidden") as HTMLInputElement).checked) void safeStop("页面关闭"); });
+  window.addEventListener("pagehide", () => {
+    if (activeAudioSession || ($("wdHidden") as HTMLInputElement).checked) void safeStop("页面关闭");
+  });
   navigator.usb?.addEventListener("connect", (ev: USBConnectionEvent) => {
     if (autoRe.checked && !pcan && ev.device.vendorId === 0x0c72) void pcanOpen(ev.device, true);
   });
@@ -1215,6 +1280,7 @@ function init(): void {
     rate.st = rate.fb = rate.rx = rate.tx = rate.uart = 0;
   }, 1000);
   setInterval(refreshUi, 100);
+  setInterval(() => audioUi?.refresh(), 500);
   setInterval(renderNodes, 500);
   dash.init();
   setInterval(() => cfg.refreshUi(), 250);
