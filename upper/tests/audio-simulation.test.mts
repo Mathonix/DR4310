@@ -6,7 +6,7 @@ import { AudioWindow } from "../src/audio-window.ts";
 import { AudioSession } from "../src/audio-session.ts";
 import { parseAudioBytes } from "../src/audio-file.ts";
 
-function fromHex(hex: string): Uint8Array { return Uint8Array.from(hex.match(/../g)!.map(x => parseInt(x, 16))); }
+function fromHex(hex: string): Uint8Array { return Uint8Array.from((hex.match(/../g) ?? []).map(x => parseInt(x, 16))); }
 
 test("frozen cross-language golden vectors match packer and decoder", () => {
   const vectors = JSON.parse(readFileSync(new URL("./protocol_vectors.json", import.meta.url), "utf8"));
