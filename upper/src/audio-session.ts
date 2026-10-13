@@ -131,7 +131,7 @@ export class AudioSession {
     if (cmd === "AUDIO OPEN") this.openCommandSent = true;
     try { await this.serial.writeText(command + "\n"); }
     catch (e) {
-      if (waiter) clearTimeout(waiter.timer);
+      if (this.asciiWait) clearTimeout(this.asciiWait.timer);
       this.asciiWait = null;
       // OPEN write may have partially succeeded; treat mode as unknown.
       void promise.catch(() => {});
