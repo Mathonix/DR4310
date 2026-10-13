@@ -393,6 +393,7 @@ async function gmTick(): Promise<void> {
   } finally { gmBusy = false; }
 }
 function startGmLoop(): void {
+  if (activeAudioSession) { toast("AUDIO 播放期间禁止 GM 电流控制", "err"); return; }
   if (stopTask || emergencyTask || switchingNode) return;
   void dash.halt("", false);
   controlEpoch++; pcan?.cancelPending();
@@ -840,7 +841,7 @@ async function changeMotorId(id: number): Promise<void> {
   switchingNode = true;
   $<HTMLSelectElement>("motorId").disabled = true;
   try {
-    if (canDriving || serialDriving || aeActive() || dash.running || gmTimer || mitTimer || gainTimers.spd || gainTimers.pos || (lastStatus && lastStatus.mode > 0)) await safeStop("切换电机");
+    if (activeAudioSession || canDriving || serialDriving || aeActive() || dash.running || gmTimer || mitTimer || gainTimers.spd || gainTimers.pos || (lastStatus && lastStatus.mode > 0)) await safeStop("切换电机");
     else { controlEpoch++; pcan?.cancelPending(); }
     setMotorId(id);
     $<HTMLSelectElement>("motorId").value = String(id);
@@ -1111,6 +1112,7 @@ function init(): void {
   $("tabs").addEventListener("click", (e) => {
     const b = (e.target as HTMLElement).closest("button[data-tab]") as HTMLButtonElement | null;
     if (!b) return;
+    if (activeAudioSession && b.dataset.tab !== "audio") void safeStop("切换调试标签，停止 AUDIO");
     document.querySelectorAll("#tabs button").forEach((x) => x.classList.toggle("active", x === b));
     document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("active", p.id === "panel-" + b.dataset.tab));
     b.scrollIntoView({ block: "nearest", inline: "nearest" });
