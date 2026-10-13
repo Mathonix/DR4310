@@ -78,7 +78,7 @@ export function initAudioUI(host: Host) {
     const axis = $<HTMLSelectElement>("audioAxis").value as "Q" | "D";
     active = true; $("audioError").textContent = ""; render();
     try { await host.start(audio, axis, amp); }
-    catch (e) { $("audioError").textContent = String(e instanceof Error ? e.message : e); }
+    catch (e) { active = false; $("audioError").textContent = String(e instanceof Error ? e.message : e); }
     finally { render(); }
   });
   $("audioPause").addEventListener("click", () => void host.pause());
