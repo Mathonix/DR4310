@@ -10,6 +10,7 @@ export class AudioWindow {
   private pending = new Map<number, Pending>();
   retransmissions = 0;
   private stopped = false;
+  private retryRequested = false;
 
   constructor(frames: readonly Uint8Array[], private readonly maxWindow = 6) {
     if (!frames.length || maxWindow < 1 || maxWindow > 6) throw new Error("无效的 AUDIO 窗口");
@@ -39,14 +40,19 @@ export class AudioWindow {
     if (ackNextSeq === this.ack) return false;
     for (let n = this.ack; n < ackNextSeq; n++) this.pending.delete(n);
     this.ack = ackNextSeq;
+    this.retryRequested = false;
     return true;
   }
+
+  /** A recoverable MCU NACK schedules an immediate retransmit of the earliest unacknowledged DATA. */
+  nack(): void { if (this.pending.size) this.retryRequested = true; }
 
   /** Reserve exactly one DATA frame. Writer should call failed() if transmission rejects. */
   next(now: number): AudioDispatch | null {
     if (this.stopped) return null;
     for (const [seq, p] of this.pending) {
-      if (now - p.lastAt >= 100) {
+      if (now - p.lastAt >= 100 || this.retryRequested && seq === this.ack) {
+        this.retryRequested = false;
         if (p.attempts >= 6) throw new Error("AUDIO DATA 超过 5 次重传");
         p.lastAt = now; p.attempts++; this.retransmissions++;
         return { seq, retry: true, samples: this.frames[seq]! };
