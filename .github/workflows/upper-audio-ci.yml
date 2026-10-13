@@ -29,5 +29,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dr4310-upper-audio-screenshot
-          path: upper/dist/audio-panel.png
+          path: |
+            upper/dist/audio-panel.png
+            upper/dist/audio-panel-dark.png
           if-no-files-found: error
