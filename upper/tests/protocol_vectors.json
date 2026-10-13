@@ -1,0 +1,41 @@
+{
+  "protocol": "DR4310 AUDIO UART V1 FROZEN",
+  "note": "Independently calculated from frozen frame layout + CCITT-FALSE; firmware team should reuse these values",
+  "samples": [
+    {
+      "type": "DATA",
+      "sid": 42,
+      "seq": 0,
+      "payload_hex": "a55a000a0d40ff00",
+      "frame_hex": "a55a01012a00000000000800a55a000a0d40ff003f4e"
+    },
+    {
+      "type": "PING",
+      "sid": 42,
+      "seq": 0,
+      "payload_hex": "",
+      "frame_hex": "a55a01042a0000000000000087f8"
+    },
+    {
+      "type": "EXIT",
+      "sid": 42,
+      "seq": 0,
+      "payload_hex": "",
+      "frame_hex": "a55a01052a00000000000000a413"
+    },
+    {
+      "type": "END",
+      "sid": 42,
+      "seq": 1,
+      "payload_hex": "",
+      "frame_hex": "a55a01022a00010000000000afe7"
+    },
+    {
+      "type": "STATUS",
+      "sid": 42,
+      "seq": 0,
+      "payload_hex": "010000000c000000a0000000000000006007000000000000",
+      "frame_hex": "a55a01812a00000000001800010000000c000000a00000000000000060070000000000000e6d"
+    }
+  ]
+}
