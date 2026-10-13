@@ -60,6 +60,6 @@ ffmpeg -i music.mp3 -ac 1 -ar 8000 -acodec pcm_s16le -f s16le music.raw
 
 `npm run test:audio` 包含：CCITT-FALSE、帧/STATUS roundtrip、split/噪声/CRC损坏、PCM 文件校验、20/60/300s 切片、累计 ACK/grant/窗口/丢包重传、抢占 ABORT/EXIT、模拟 60s 传输（检查 PCM 容量和无欠载）、虚拟 MCU 全链路暂停/继续/END/EXIT/ASCII 恢复。
 
-`tests/protocol_vectors.json` 是由冻结文档字段和 CRC 算法独立计算的共享候选向量；**仍需固件 Agent 使用同一 JSON 逐字节运行 C 端 golden 测试**。CI 软件通过 ≠ MCU 实机通过，尚无物理电机、UART 信号、示波器或音质测量，急停/欠载的物理时序无法据此保证。前端真实浏览器截图/真机录像仍需补充。
+`tests/protocol_vectors.json` 是由冻结文档字段和 CRC 算法独立计算的共享候选向量；**仍需固件 Agent 使用同一 JSON 逐字节运行 C 端 golden 测试**。CI 软件通过 ≠ MCU 实机通过，尚无物理电机、UART 信号、示波器或音质测量，急停/欠载的物理时序无法据此保证。实际构建的前端 light/dark 浏览器截图可从 PR GitHub Actions 的 dr4310-upper-audio-screenshot artifact 下载；真机录像仍需补充。
 
 协议冲突按双 Agent 文档变更流程处理，不擅自改变 V1 号或错误码。
