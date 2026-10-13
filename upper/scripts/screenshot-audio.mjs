@@ -15,6 +15,11 @@ try {
   await page.screenshot({ path: output, fullPage: true });
   const darkOutput = path.resolve("dist/audio-panel-dark.png");
   await page.locator("#themeToggle").click();
+  await page.waitForTimeout(800); // wait for theme CSS transitions before capture
+  console.log("theme:", await page.evaluate(() => ({
+    mode: document.documentElement.dataset.theme,
+    background: getComputedStyle(document.body).backgroundColor,
+  })));
   await page.screenshot({ path: darkOutput, fullPage: true });
   console.log("Captured real-built AUDIO UI:", output, darkOutput);
 } finally {
