@@ -13,7 +13,10 @@ try {
   await page.locator('button[data-tab="audio"]').click();
   await page.locator("#audioPlay").waitFor({ state: "visible" });
   await page.screenshot({ path: output, fullPage: true });
-  console.log("Captured real-built AUDIO UI:", output);
+  const darkOutput = path.resolve("dist/audio-panel-dark.png");
+  await page.locator("#themeToggle").click();
+  await page.screenshot({ path: darkOutput, fullPage: true });
+  console.log("Captured real-built AUDIO UI:", output, darkOutput);
 } finally {
   await browser.close();
 }
