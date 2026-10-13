@@ -342,4 +342,17 @@ table.cfgparams td { border: 0; padding: 0; min-width: 0; }
   .more-actions > summary { padding-inline: 8px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+
+#tabs { flex-wrap:wrap; }
+.audio-ui .audio-form { display:flex; flex-direction:column; gap:10px; }
+.audio-ui .audio-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.audio-ui .audio-fields>div { display:flex; flex-direction:column; gap:5px; }
+.audio-ui .audio-progress { display:flex; gap:12px; align-items:center; }
+.audio-ui progress { flex:1; width:100%; accent-color:var(--accent); height:12px; }
+.audio-ui .audio-stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+.audio-ui .audio-stats>div { border:1px solid var(--line); border-radius:8px; padding:10px; font-size:12px; color:var(--muted); }
+.audio-ui .audio-stats b { display:block; margin-top:5px; font-family:var(--mono); font-size:14px; color:var(--fg); overflow-wrap:anywhere; }
+@media(max-width:650px){.audio-ui .audio-stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:450px){.audio-ui .audio-fields{grid-template-columns:1fr}}
+
 `;

@@ -3,10 +3,14 @@ export class SerialLink {
   port: SerialPort | null = null;
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private running = false;
+  private activeBaud = 0;
+  get baudRate(): number { return this.connected ? this.activeBaud : 0; }
   private generation = 0;
   private writes = 0;
   private readDone: Promise<void> = Promise.resolve();
   private enc = new TextEncoder();
+  /** AUDIO frames are bounded to one 334-byte UART packet. */
+  readonly maxAudioFrameBytes = 334;
   onData: ((chunk: Uint8Array) => void) | null = null;
   onClose: ((reason: string) => void) | null = null;
 
@@ -22,6 +26,7 @@ export class SerialLink {
   async openPort(port: SerialPort, baud: number): Promise<void> {
     await port.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none", bufferSize: 65536 });
     this.port = port;
+    this.activeBaud = baud;
     this.running = true;
     const generation = ++this.generation;
     this.readDone = this.readLoop(port, generation);
@@ -60,12 +65,11 @@ export class SerialLink {
 
   cancelPending(): void { this.writes++; }
 
-  /** Writes are serialized: concurrent callers would otherwise fight over the writer lock. */
-  writeText(s: string): Promise<void> {
-    const data = this.enc.encode(s);
+  /** Writes share one FIFO chain and one cancellation generation. */
+  private enqueue(data: Uint8Array, priority = false): Promise<void> {
     const port = this.port, writes = this.writes, generation = this.generation;
     const run = async () => {
-      if (writes !== this.writes || generation !== this.generation) throw new Error("发送已取消");
+      if ((!priority && writes !== this.writes) || generation !== this.generation) throw new Error("发送已取消");
       if (!port?.writable || !this.connected) throw new Error("串口未打开");
       const w = port.writable.getWriter();
       try { await w.write(data); } finally { w.releaseLock(); }
@@ -73,6 +77,30 @@ export class SerialLink {
     const p = this.writeChain.then(run, run);
     this.writeChain = p.catch(() => undefined);
     return p;
+  }
+
+  /** ASCII commands and AUDIO packets use the same writer queue. */
+  writeText(s: string): Promise<void> { return this.enqueue(this.enc.encode(s)); }
+
+  /** Never open a second SerialPort/writer. Only complete AUDIO V1 frames are permitted. */
+  writeBytes(bytes: Uint8Array): Promise<void> {
+    if (!bytes.length || bytes.length > this.maxAudioFrameBytes) return Promise.reject(new Error("AUDIO 帧长度非法"));
+    return this.enqueue(bytes.slice());
+  }
+
+  /** Cancel queued DATA and place ABORT immediately after the current in-progress write.
+   * The ABORT itself is enqueued in the new write generation, not the cancelled one. */
+  abortAudio(bytes: Uint8Array): Promise<void> {
+    this.cancelPending();
+    return this.writePriorityAudioControl(bytes, 0x03);
+  }
+
+  /** Safety controls survive subsequent ordinary cancelPending() calls. */
+  writePriorityAudioControl(bytes: Uint8Array, expectedType: 0x03 | 0x05): Promise<void> {
+    if (bytes.length !== 14 || bytes[0] !== 0xA5 || bytes[1] !== 0x5A ||
+        bytes[2] !== 1 || bytes[3] !== expectedType)
+      return Promise.reject(new Error("仅允许合法长度的 AUDIO ABORT/EXIT 高优先级控制包"));
+    return this.enqueue(bytes.slice(), true);
   }
 
   async close(): Promise<void> {
@@ -86,6 +114,6 @@ export class SerialLink {
     await settle(this.readDone);
     await settle(this.writeChain);
     try { await port?.close(); } catch { /* ignore */ }
-    if (this.port === port) this.port = null;
+    if (this.port === port) { this.port = null; this.activeBaud = 0; }
   }
 }
