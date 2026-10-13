@@ -36,7 +36,7 @@ export class AudioSession {
   private error = "";
 
   constructor(
-    private readonly serial: Pick<SerialLink, "connected" | "writeBytes" | "writeText" | "abortAudio">,
+    private readonly serial: Pick<SerialLink, "connected" | "writeBytes" | "writeText" | "abortAudio" | "writePriorityAudioControl">,
     readonly file: AudioInput,
     private readonly restoreTelem: number,
     private readonly onUpdate: (s: AudioSnapshot) => void,
@@ -290,6 +290,15 @@ export class AudioSession {
     if (this.stopping) return this.stopping;
     this.window.halt();
     this.pauseRequested = true;
+    // A stop/estop must preempt a pending PAUSE/RESUME acknowledgement.
+    if (this.statusWait) {
+      const wait = this.statusWait; this.statusWait = null;
+      clearTimeout(wait.timer); wait.reject(new Error("AUDIO 安全停止抢占"));
+    }
+    if (this.asciiWait && !this.binary) {
+      const wait = this.asciiWait; this.asciiWait = null;
+      clearTimeout(wait.timer); wait.reject(new Error("AUDIO 安全停止抢占"));
+    }
     if (this.timer !== null) { clearInterval(this.timer); this.timer = null; }
     this.phase = "CLOSING"; this.update();
     this.stopping = this.shutdown(reason, abort);
@@ -306,7 +315,10 @@ export class AudioSession {
           // The MCU disables on ABORT even if its acknowledgement is lost; EXIT is the recovery path.
         }
         const wait = this.awaitStatus(s => s.stateCode === AUDIO_STATE.EXITED, 650);
-        try { await this.sendBinary(AUDIO_TYPE.EXIT); await wait; }
+        try {
+          await this.serial.writePriorityAudioControl(packAudioFrame(AUDIO_TYPE.EXIT, this.sid, 0), 0x05);
+          await wait;
+        }
         catch (e) { void wait.catch(() => {}); throw e; }
       } else if (this.openCommandSent) {
         throw new Error("OPEN 已发出但串口模式未知，禁止发送裸 ASCII STOP");
