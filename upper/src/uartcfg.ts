@@ -73,6 +73,7 @@ export function createUartCfg(h: UartCfgHost) {
   const queue: Job[] = [];
   let inflight: Job | null = null;
   let generation = 0;
+  let audioExclusive = false;
 
   parser.onChannels = (n) => {
     if (channels.length === n) return;
@@ -87,6 +88,7 @@ export function createUartCfg(h: UartCfgHost) {
   // ---------- request / reply ----------
   function enqueueRequest(line: string, o: { note?: string; poll?: boolean; timeout?: number } = {}): Promise<Result> {
     return new Promise((resolve) => {
+      if (audioExclusive) { resolve({ ok: false, err: "AUDIO 独占期间禁止配置/遥测命令", params: [], lines: [] }); return; }
       if (!h.serial.connected) { resolve({ ok: false, err: "串口未连接", params: [], lines: [] }); return; }
       queue.push({ line, key: replyKeyFor(line), note: o.note ?? "", poll: !!o.poll, timeout: o.timeout ?? 1000, resolve, params: [], lines: [], timer: 0, done: false });
       pump();
@@ -108,7 +110,7 @@ export function createUartCfg(h: UartCfgHost) {
     pump();
   }
   function pump(): void {
-    if (inflight || !queue.length) return;
+    if (audioExclusive || inflight || !queue.length) return;
     const job = queue.shift()!;
     inflight = job;
     h.log("TX", job.line.trim(), job.note, job.poll);
@@ -175,6 +177,7 @@ export function createUartCfg(h: UartCfgHost) {
   }
 
   function onData(chunk: Uint8Array): void {
+    if (audioExclusive) return;
     const { frames, lines } = parser.push(chunk);
     const now = performance.now();
     for (const fr of frames) h.onFrame(fr, now);
@@ -230,6 +233,7 @@ export function createUartCfg(h: UartCfgHost) {
   // ---------- connect / probe (auto-connect flow) ----------
   /** Call before SerialLink.open(): the read loop starts inside open(). */
   function prepare(): void {
+    audioExclusive = false;
     generation++; cancelPending("重新连接");
     parser.reset(); parser.setChannels(16); channels = LEGACY_CHANNELS; h.onChannels(channels);
     info = null; lastFault = null; devParams.clear(); features = NO_FEATURES(); catalogue = [];
@@ -279,6 +283,7 @@ export function createUartCfg(h: UartCfgHost) {
     h.toast(parser.frames > 0 ? "串口：收到 JustFloat 但无应答 → 旧固件（参数配置不可用，仪表盘仅电流模式）" : "串口：没有收到任何数据，检查接线 / 波特率 / 电源", parser.frames > 0 ? "" : "err");
   }
   function onClosed(): void {
+    audioExclusive = false;
     generation++;
     fw = "none"; info = null;
     cancelPending("串口已断开");
@@ -838,7 +843,7 @@ export function createUartCfg(h: UartCfgHost) {
 
   let hbTick = 0;
   async function heartbeat(): Promise<void> {
-    if (!h.serial.connected || fw !== "v2" || !$<HTMLInputElement>("cfgHb").checked || inflight || queue.length) return;
+    if (audioExclusive || !h.serial.connected || fw !== "v2" || !$<HTMLInputElement>("cfgHb").checked || inflight || queue.length) return;
     hbTick++;
     const r = await request(hbTick % 2 ? "PING\n" : "INFO\n", { poll: true, timeout: 800 });
     if (!r.ok && r.timeout) missedPolls++;
@@ -908,8 +913,15 @@ export function createUartCfg(h: UartCfgHost) {
     setInterval(() => void heartbeat(), 500);
   }
 
+  function setAudioExclusive(on: boolean): void {
+    if (on === audioExclusive) return;
+    audioExclusive = on;
+    if (on) cancelPending("AUDIO 独占接管 UART");
+    parser.reset(); // Keep the parser instance and its subscribers; clear only residual bytes.
+  }
+
   return {
-    parser, prepare, onData, onOpened, onClosed, refreshUi, init, request, run, setZero, clearFaults, readFault, showPage, importProfile, ensurePositionTelemetry,
+    setAudioExclusive, parser, prepare, onData, onOpened, onClosed, refreshUi, init, request, run, setZero, clearFaults, readFault, showPage, importProfile, ensurePositionTelemetry,
     get fw(): FwState { return fw; },
     get unsaved(): boolean { return unsaved; },
     get busy(): boolean { return !!inflight || queue.length > 0; },
