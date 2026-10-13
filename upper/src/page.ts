@@ -153,8 +153,8 @@ export function page(appScriptSrc = "/app.js"): string {
           <h3>串口</h3>
           <div class="btns" style="margin-top:0">
             <select aria-label="串口波特率" id="serBaud" style="width:auto">
-              <option value="115200" selected>115200</option>
-              <option value="230400">230400</option>
+              <option value="115200">115200</option>
+              <option value="230400" selected>230400</option>
               <option value="460800">460800</option>
               <option value="921600">921600</option>
             </select>
@@ -349,6 +349,7 @@ export function page(appScriptSrc = "/app.js"): string {
         <button type="button" data-tab="native" class="active">原生控制</button>
         <button type="button" data-tab="gm">GM6020 电流</button>
         <button type="button" data-tab="uart">串口</button>
+        <button type="button" data-tab="audio">电机音乐</button>
         <button type="button" data-tab="log">帧日志</button>
       </nav>
 
@@ -476,6 +477,45 @@ export function page(appScriptSrc = "/app.js"): string {
       <div class="charts" style="margin-top:1rem">
         <div class="chart"><div class="ct"><span>串口图 A</span><span class="legend" id="lgUA"></span></div><canvas id="chUA"></canvas></div>
         <div class="chart"><div class="ct"><span>串口图 B</span><span class="legend" id="lgUB"></span></div><canvas id="chUB"></canvas></div>
+      </div>
+    </div>
+
+
+    <!-- AUDIO: exclusive Web Serial protocol, shared existing writer/read loop -->
+    <div class="panel" id="panel-audio">
+      <div class="sec audio-ui">
+        <h3>电机音乐 / AUDIO V1</h3>
+        <p class="small" style="color:var(--amber)">RAW / PCM 必须是 <b>8000 Hz · Mono · Signed 16-bit · Little Endian</b>，RAW 无文件头无法自动识别格式。WAV 仅支持相同参数的 PCM。</p>
+        <p class="small" style="color:var(--danger)">务必固定电机、确认硬件急停可用，先以 20mA 空载试验。浏览器关页和拔线不能保证软件停机，固件须具备独立 300ms watchdog。</p>
+        <div class="audio-form">
+          <label class="field" for="audioFile">音频文件 (.raw / .pcm / .wav)</label>
+          <input id="audioFile" type="file" accept=".raw,.pcm,.wav"/>
+          <div id="audioMeta" class="small mono">未选择文件</div>
+          <div class="audio-fields">
+            <div><label class="field" for="audioAxis">FOC 电流轴</label><select id="audioAxis"><option value="Q">Q · 转矩音频</option><option value="D">D · 磁链音频</option></select></div>
+            <div><label class="field" for="audioAmp">峰值幅度 mA (1..200)</label><input id="audioAmp" type="number" min="1" max="200" step="1" value="20"/></div>
+          </div>
+          <div class="btns">
+            <button type="button" id="audioPlay" disabled>播放</button>
+            <button type="button" class="ghost" id="audioPause" disabled>暂停</button>
+            <button type="button" class="ghost" id="audioResume" disabled>继续</button>
+            <button type="button" class="danger" id="audioStop" disabled>停止</button>
+          </div>
+          <div class="small mono" id="audioLink">UART 未连接</div>
+          <div class="audio-progress"><progress id="audioProgress" max="1" value="0"></progress><strong class="mono" id="audioPercent">0%</strong></div>
+          <div class="audio-stats">
+            <div>状态 <b id="audioState">待机</b></div>
+            <div>协议 <b id="audioSid">未协商</b></div>
+            <div>已播放 <b id="audioPlayed">0.00 s</b></div>
+            <div>Buffer <b id="audioBuffer">—</b></div>
+            <div>发送进度 <b id="audioSent">—</b></div>
+            <div>ACK index <b id="audioAck">—</b></div>
+            <div>重发 <b id="audioRetry">—</b></div>
+            <div>Underrun <b id="audioUnderrun">—</b></div>
+            <div>Fault / Reason <b id="audioFault">—</b></div>
+          </div>
+          <p id="audioError" class="small" style="color:var(--danger)" role="alert" aria-live="assertive"></p>
+        </div>
       </div>
     </div>
 
