@@ -6,6 +6,9 @@ export const AUDIO_HEADER_SIZE = 12;
 export const AUDIO_MAX_PAYLOAD = 320;
 export const AUDIO_MAX_FRAME_SIZE = 334;
 
+export const AUDIO_STATE = { BUFFERING: 0, PLAYING: 1, PAUSED: 2, DRAINING: 3, FINISHED: 4, HALTED: 5, FAULT: 6, EXITED: 7 } as const;
+export const AUDIO_REASON = { OK: 0, CRC_ERROR: 1, SEQ_GAP: 2, BUFFER_FULL: 3, PROTOCOL_ERROR: 4,
+  TIMEOUT: 5, UNDERRUN: 6, CANCELLED: 7, SAFETY_FAULT: 8, MODE_CHANGED: 9, ENDED: 10, SESSION_MISMATCH: 11 } as const;
 export const AUDIO_TYPE = {
   DATA: 0x01, END: 0x02, ABORT: 0x03, PING: 0x04,
   EXIT: 0x05, PAUSE: 0x06, RESUME: 0x07, STATUS: 0x81,
@@ -48,14 +51,17 @@ export function packAudioFrame(type: number, sid: number, seq: number, payload: 
 }
 
 export function parseAudioStatus(frame: AudioFrame, sid: number): AudioStatus {
-  if (frame.type !== AUDIO_TYPE.STATUS || frame.sid !== sid || frame.payload.length !== 24)
+  if (frame.type !== AUDIO_TYPE.STATUS || frame.sid !== sid || frame.payload.length !== 24 || sid === 0)
     throw new Error("STATUS 类型、sid 或长度错误");
   const d = new DataView(frame.payload.buffer, frame.payload.byteOffset, frame.payload.byteLength);
+  const stateCode = d.getUint8(20), reasonCode = d.getUint8(21);
+  if (stateCode > AUDIO_STATE.EXITED || reasonCode > AUDIO_REASON.SESSION_MISMATCH || d.getUint16(22, true) !== 0)
+    throw new Error("STATUS 状态码、原因码或保留位非法");
   return {
     ackNextSeq: d.getUint32(0, true), grantSeqExclusive: d.getUint32(4, true),
     playedSamples: d.getUint32(8, true), underrunCount: d.getUint32(12, true),
     bufferSamples: d.getUint16(16, true), faultFlags: d.getUint16(18, true),
-    stateCode: d.getUint8(20), reasonCode: d.getUint8(21), reserved: d.getUint16(22, true),
+    stateCode, reasonCode, reserved: 0,
   };
 }
 
@@ -78,7 +84,8 @@ export class AudioFrameDecoder {
       if (this.pending.length < AUDIO_HEADER_SIZE) break;
       const version = this.pending[2]!;
       const len = this.pending[10]! | this.pending[11]! << 8;
-      if (version !== AUDIO_VERSION || len > AUDIO_MAX_PAYLOAD) {
+      const type = this.pending[3]!;
+      if (version !== AUDIO_VERSION || len > AUDIO_MAX_PAYLOAD || !Object.values(AUDIO_TYPE).includes(type as typeof AUDIO_TYPE[keyof typeof AUDIO_TYPE]) || (type === AUDIO_TYPE.DATA && (len === 0 || !!(len & 1))) || (type === AUDIO_TYPE.STATUS && len !== 24) || (type !== AUDIO_TYPE.DATA && type !== AUDIO_TYPE.STATUS && len !== 0)) {
         this.formatErrors++; this.pending.shift(); continue;
       }
       const size = AUDIO_HEADER_SIZE + len + 2;
