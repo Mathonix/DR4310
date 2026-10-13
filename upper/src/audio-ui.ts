@@ -1,6 +1,6 @@
-import { loadAudioFile, type AudioInput } from "./audio-file";
-import { AUDIO_REASON } from "./audio-protocol";
-import type { AudioSnapshot } from "./audio-session";
+import { loadAudioFile, type AudioInput } from "./audio-file.ts";
+import { AUDIO_REASON } from "./audio-protocol.ts";
+import type { AudioSnapshot } from "./audio-session.ts";
 
 type Host = {
   start(audio: AudioInput, axis: "Q" | "D", ampMa: number): Promise<void>;
