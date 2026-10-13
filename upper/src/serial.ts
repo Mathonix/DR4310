@@ -3,6 +3,8 @@ export class SerialLink {
   port: SerialPort | null = null;
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private running = false;
+  private activeBaud = 0;
+  get baudRate(): number { return this.connected ? this.activeBaud : 0; }
   private generation = 0;
   private writes = 0;
   private readDone: Promise<void> = Promise.resolve();
@@ -24,6 +26,7 @@ export class SerialLink {
   async openPort(port: SerialPort, baud: number): Promise<void> {
     await port.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none", bufferSize: 65536 });
     this.port = port;
+    this.activeBaud = baud;
     this.running = true;
     const generation = ++this.generation;
     this.readDone = this.readLoop(port, generation);
@@ -111,6 +114,6 @@ export class SerialLink {
     await settle(this.readDone);
     await settle(this.writeChain);
     try { await port?.close(); } catch { /* ignore */ }
-    if (this.port === port) this.port = null;
+    if (this.port === port) { this.port = null; this.activeBaud = 0; }
   }
 }
