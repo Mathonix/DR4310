@@ -63,10 +63,10 @@ export class SerialLink {
   cancelPending(): void { this.writes++; }
 
   /** Writes share one FIFO chain and one cancellation generation. */
-  private enqueue(data: Uint8Array): Promise<void> {
+  private enqueue(data: Uint8Array, priority = false): Promise<void> {
     const port = this.port, writes = this.writes, generation = this.generation;
     const run = async () => {
-      if (writes !== this.writes || generation !== this.generation) throw new Error("发送已取消");
+      if ((!priority && writes !== this.writes) || generation !== this.generation) throw new Error("发送已取消");
       if (!port?.writable || !this.connected) throw new Error("串口未打开");
       const w = port.writable.getWriter();
       try { await w.write(data); } finally { w.releaseLock(); }
@@ -89,7 +89,15 @@ export class SerialLink {
    * The ABORT itself is enqueued in the new write generation, not the cancelled one. */
   abortAudio(bytes: Uint8Array): Promise<void> {
     this.cancelPending();
-    return this.writeBytes(bytes);
+    return this.writePriorityAudioControl(bytes, 0x03);
+  }
+
+  /** Safety controls survive subsequent ordinary cancelPending() calls. */
+  writePriorityAudioControl(bytes: Uint8Array, expectedType: 0x03 | 0x05): Promise<void> {
+    if (bytes.length !== 14 || bytes[0] !== 0xA5 || bytes[1] !== 0x5A ||
+        bytes[2] !== 1 || bytes[3] !== expectedType)
+      return Promise.reject(new Error("仅允许合法长度的 AUDIO ABORT/EXIT 高优先级控制包"));
+    return this.enqueue(bytes.slice(), true);
   }
 
   async close(): Promise<void> {
