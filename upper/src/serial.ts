@@ -7,6 +7,8 @@ export class SerialLink {
   private writes = 0;
   private readDone: Promise<void> = Promise.resolve();
   private enc = new TextEncoder();
+  /** AUDIO frames are bounded to one 334-byte UART packet. */
+  readonly maxAudioFrameBytes = 334;
   onData: ((chunk: Uint8Array) => void) | null = null;
   onClose: ((reason: string) => void) | null = null;
 
@@ -60,9 +62,8 @@ export class SerialLink {
 
   cancelPending(): void { this.writes++; }
 
-  /** Writes are serialized: concurrent callers would otherwise fight over the writer lock. */
-  writeText(s: string): Promise<void> {
-    const data = this.enc.encode(s);
+  /** Writes share one FIFO chain and one cancellation generation. */
+  private enqueue(data: Uint8Array): Promise<void> {
     const port = this.port, writes = this.writes, generation = this.generation;
     const run = async () => {
       if (writes !== this.writes || generation !== this.generation) throw new Error("发送已取消");
@@ -73,6 +74,22 @@ export class SerialLink {
     const p = this.writeChain.then(run, run);
     this.writeChain = p.catch(() => undefined);
     return p;
+  }
+
+  /** ASCII commands and AUDIO packets use the same writer queue. */
+  writeText(s: string): Promise<void> { return this.enqueue(this.enc.encode(s)); }
+
+  /** Never open a second SerialPort/writer. Only complete AUDIO V1 frames are permitted. */
+  writeBytes(bytes: Uint8Array): Promise<void> {
+    if (!bytes.length || bytes.length > this.maxAudioFrameBytes) return Promise.reject(new Error("AUDIO 帧长度非法"));
+    return this.enqueue(bytes.slice());
+  }
+
+  /** Cancel queued DATA and place ABORT immediately after the current in-progress write.
+   * The ABORT itself is enqueued in the new write generation, not the cancelled one. */
+  abortAudio(bytes: Uint8Array): Promise<void> {
+    this.cancelPending();
+    return this.writeBytes(bytes);
   }
 
   async close(): Promise<void> {
