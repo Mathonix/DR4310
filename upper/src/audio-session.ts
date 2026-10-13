@@ -1,7 +1,7 @@
-import { AUDIO_REASON, AUDIO_STATE, AUDIO_TYPE, AudioFrameDecoder, packAudioFrame, parseAudioStatus, type AudioStatus } from "./audio-protocol";
-import { AudioWindow } from "./audio-window";
-import type { AudioInput } from "./audio-file";
-import type { SerialLink } from "./serial";
+import { AUDIO_REASON, AUDIO_STATE, AUDIO_TYPE, AudioFrameDecoder, packAudioFrame, parseAudioStatus, type AudioStatus } from "./audio-protocol.ts";
+import { AudioWindow } from "./audio-window.ts";
+import type { AudioInput } from "./audio-file.ts";
+import type { SerialLink } from "./serial.ts";
 
 export type AudioPhase = "DISCONNECTED" | "ASCII_READY" | "OPENING" | "BUFFERING" | "PLAYING" | "PAUSED" | "DRAINING" | "FINISHED" | "HALTED" | "FAULT" | "CLOSING";
 export type AudioSnapshot = {
