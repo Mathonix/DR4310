@@ -519,7 +519,7 @@ async function serConnect(port?: SerialPort): Promise<void> {
 }
 function serUi(on: boolean): void {
   $("dotSer").className = "dot" + (on ? " on" : "");
-  $("stSer").textContent = on ? `已连接 · ${$<HTMLSelectElement>("serBaud").value} 8N1` : "未连接";
+  $("stSer").textContent = on ? `已连接 · ${serial.baudRate} 8N1` : "未连接";
   $("serConnect").toggleAttribute("disabled", on);
   $("serDisconnect").toggleAttribute("disabled", !on);
   audioUi?.refresh();
@@ -550,7 +550,7 @@ async function serSend(line: string, note = "", safety = false): Promise<boolean
 // ---------------- AUDIO V1 ----------------
 async function audioStart(file: AudioInput, axis: "Q" | "D", ampMa: number): Promise<void> {
   if (activeAudioSession) throw new Error("已有 AUDIO 会话");
-  if (!serial.connected || $<HTMLSelectElement>("serBaud").value !== "230400")
+  if (!serial.connected || serial.baudRate !== 230400)
     throw new Error("AUDIO V1 必须通过 230400 8N1 Web Serial 连接");
   if (cfg.fw !== "v2") throw new Error("固件未识别，不支持 AUDIO V1");
   if (!Number.isInteger(ampMa) || ampMa < 1 || ampMa > 200) throw new Error("峰值幅度必须是 1..200mA 的整数");
