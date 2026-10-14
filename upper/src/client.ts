@@ -226,7 +226,7 @@ function idsText(): string {
 
 async function sendCan(id: number, data: Uint8Array, note: string, safety = false, valid: () => boolean = () => true): Promise<boolean> {
   const epoch = controlEpoch;
-  const allowed = () => valid() && (safety || (epoch === controlEpoch && !stopTask && !emergencyTask && !switchingNode));
+  const allowed = () => valid() && (safety || (epoch === controlEpoch && !stopTask && !emergencyTask && !switchingNode && !cfg.coggingBusy && !cfg.audioBusy));
   if (!allowed()) return false;
   if (!pcan || !busOn) { toast("PCAN 未连接或总线未打开", "err"); return false; }
   try {
@@ -525,8 +525,9 @@ async function serDisconnect(sendStop = true): Promise<void> {
   lastUart = null;
 }
 async function serSend(line: string, note = "", safety = false): Promise<boolean> {
+  if (cfg.audioBinary) return false;
   const epoch = controlEpoch;
-  if (!safety && line.trim() !== "STOP" && (stopTask || emergencyTask || switchingNode)) return false;
+  if (!safety && line.trim() !== "STOP" && (stopTask || emergencyTask || switchingNode || cfg.coggingBusy || cfg.audioBusy)) return false;
   if (!serial.connected) { toast("串口未连接", "err"); return false; }
   try {
     await serial.writeText(line);
@@ -538,7 +539,9 @@ async function serSend(line: string, note = "", safety = false): Promise<boolean
 }
 
 // ---------------- Safety ----------------
-function cancelControl(reason: string): boolean {
+function cancelControl(reason: string, preserveCogging = false): boolean {
+  if(!preserveCogging) cfg.abortAudio(reason);
+  if(!preserveCogging) cfg.abortCogging(reason);
   controlEpoch++;
   autoEnable.resetOff(motorId);
   void dash.halt("", false);
@@ -550,10 +553,12 @@ function cancelControl(reason: string): boolean {
   pcan?.cancelPending(); serial.cancelPending(); cfg.cancelPending(reason);
   return gmWas;
 }
-function safeStop(reason: string): Promise<void> {
+function safeStop(reason: string, preserveCogging = false): Promise<void> {
+  if(!preserveCogging) cfg.abortAudio(reason);
+  if(!preserveCogging) cfg.abortCogging(reason);
   if (stopTask) return stopTask;
   if (emergencyTask) return emergencyTask;
-  const gmWas = cancelControl(reason);
+  const gmWas = cancelControl(reason, preserveCogging);
   const id = motorId;
   stopTask = (async () => {
     await Promise.all([
@@ -563,12 +568,13 @@ function safeStop(reason: string): Promise<void> {
         const result = await stopCanWithAe(id, false, (cid, data) => sendCan(cid, data, (data[0] === 8 ? "关闭自动使能 · " : "Disable · ") + reason, true));
         autoEnable.stopped({ route: "can", id }, result.ae);
       })(),
-      stopSerial(reason),
+      stopSerial(reason, preserveCogging),
     ]);
   })().finally(() => { stopTask = null; });
   return stopTask;
 }
-async function stopSerial(reason: string): Promise<boolean> {
+async function stopSerial(reason: string, preparing = false): Promise<boolean> {
+  if (cfg.audioBusy && !preparing) return cfg.stopAudio(reason);
   if (!serial.connected) return false;
   const result = await stopSerialWithAe(async (line) => {
     // AE 0 is written raw (serial writes stay ordered, so it still precedes STOP on the wire) and is not
@@ -789,7 +795,7 @@ async function changeMotorId(id: number): Promise<void> {
   switchingNode = true;
   $<HTMLSelectElement>("motorId").disabled = true;
   try {
-    if (canDriving || serialDriving || aeActive() || dash.running || gmTimer || mitTimer || gainTimers.spd || gainTimers.pos || (lastStatus && lastStatus.mode > 0)) await safeStop("切换电机");
+    if (cfg.audioBusy || canDriving || serialDriving || aeActive() || dash.running || gmTimer || mitTimer || gainTimers.spd || gainTimers.pos || (lastStatus && lastStatus.mode > 0)) await safeStop("切换电机");
     else { controlEpoch++; pcan?.cancelPending(); }
     setMotorId(id);
     $<HTMLSelectElement>("motorId").value = String(id);
@@ -808,7 +814,7 @@ function meas(selected: Route = route("auto")): Meas {
   });
 }
 function route(pref: "auto" | "can" | "serial") {
-  if (stopTask || emergencyTask || switchingNode) return null;
+  if (stopTask || emergencyTask || switchingNode || cfg.coggingBusy || cfg.audioBusy) return null;
   const canOk = !!pcan && busOn && !canBusOff;
   const ser = serial.connected ? (cfg.fw === "v2" ? "serial" : cfg.fw === "legacy" ? "legacy" : null) : null;
   if (pref === "can") return canOk ? "can" : null;
@@ -1189,9 +1195,9 @@ function init(): void {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "hidden") return;
     dash.stopWave();
-    if (($("wdHidden") as HTMLInputElement).checked) void safeStop("页面隐藏");
+    if (cfg.audioBusy || cfg.coggingBusy || ($("wdHidden") as HTMLInputElement).checked) void safeStop("页面隐藏");
   });
-  window.addEventListener("pagehide", () => { if (($("wdHidden") as HTMLInputElement).checked) void safeStop("页面关闭"); });
+  window.addEventListener("pagehide", () => { if (cfg.audioBusy || cfg.coggingBusy || ($("wdHidden") as HTMLInputElement).checked) void safeStop("页面关闭"); });
   navigator.usb?.addEventListener("connect", (ev: USBConnectionEvent) => {
     if (autoRe.checked && !pcan && ev.device.vendorId === 0x0c72) void pcanOpen(ev.device, true);
   });
@@ -1218,10 +1224,10 @@ function init(): void {
   setInterval(renderNodes, 500);
   dash.init();
   setInterval(() => cfg.refreshUi(), 250);
-  cfg.init((reason) => safeStop(reason));
+  cfg.init((reason) => safeStop(reason), (reason) => safeStop(reason, true));
   setInterval(() => {
     const now = performance.now();
-    if (canDriving && now - canDrivingT > 1500 && !meas("can").fresh || serialDriving && now - serialDrivingT > 2500 && !meas("serial").fresh) void safeStop("反馈中断");
+    if (!cfg.audioBusy && (canDriving && now - canDrivingT > 1500 && !meas("can").fresh || serialDriving && now - serialDrivingT > 2500 && !meas("serial").fresh)) void safeStop("反馈中断");
   }, 100);
   cfg.refreshUi();
   initTheme(() => Object.values(charts).forEach((c) => c.markDirty()));

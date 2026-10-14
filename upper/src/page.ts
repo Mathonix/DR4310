@@ -24,7 +24,27 @@ export function page(appScriptSrc = "/app.js"): string {
 <meta name="description" content="DR4310 FOC 电机上位机：仪表盘（速度/力矩/位置/MIT）、参数配置、示波器；WebUSB PCAN-USB / Web Serial 串口。"/>
 <title>DR4310 上位机 · Mathonix</title>
 <script>(function(){try{var t=localStorage.getItem("dr4310-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme="dark";}})();</script>
-<style>${BASE_CSS}${CONSOLE_CSS}</style>
+<style>${BASE_CSS}${CONSOLE_CSS}
+#view-audio .audio-layout{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:20px}
+#view-audio fieldset{min-width:0;border:0;padding:0;margin:0}
+#view-audio legend{font-size:14px;font-weight:600;margin-bottom:16px;color:var(--label)}
+#view-audio .audio-card{min-width:0;border:1px solid var(--line);border-radius:var(--radius);padding:20px;background:var(--bg-2)}
+#view-audio .audio-fields{display:grid;grid-template-columns:minmax(90px,1fr) minmax(130px,1fr);gap:16px;align-items:end}
+#view-audio .audio-fields label{display:block;margin-bottom:6px}
+#view-audio .audio-current{margin-top:16px}
+#view-audio .audio-current input{display:block;min-height:30px;margin:0}
+#view-audio .audio-current p{margin:4px 0 0}
+#view-audio .audio-file-info{min-height:54px;overflow-wrap:anywhere}
+#view-audio .audio-file-label{display:block;margin-bottom:10px;color:var(--label)}
+#view-audio .audio-ready{display:flex;gap:8px;align-items:flex-start}
+#view-audio .audio-ready input{margin-top:2px}
+#view-audio .audio-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}
+#view-audio .audio-actions button{width:auto;margin:0}
+#view-audio input[type=file]{width:100%;max-width:100%;font-size:12px}
+#view-audio input[type=file]::file-selector-button{border:1px solid var(--line-2);border-radius:6px;background:var(--panel-2);color:var(--text);padding:8px 12px;margin-right:10px;cursor:pointer}
+@media(max-width:800px){#view-audio .audio-layout{grid-template-columns:1fr}}
+@media(max-width:600px){#view-audio .audio-card{padding:16px}#view-audio .audio-actions button{flex:1 1 140px}#view-audio .bh{flex-wrap:wrap}}
+</style>
 </head>
 <body>
 <header class="cmdbar">
@@ -35,6 +55,7 @@ export function page(appScriptSrc = "/app.js"): string {
   <nav class="views" id="views" aria-label="视图">
     <button type="button" data-view="dash" data-testid="view-dash" class="active">仪表盘</button>
     <button type="button" data-view="cfg" data-testid="view-cfg">参数配置</button>
+    <button type="button" data-view="audio" data-testid="view-audio">电流音频</button>
     <button type="button" data-view="debug" data-testid="view-debug">调试</button>
   </nav>
   <div class="links"><span class="pill"><span class="dot" id="dotPcan"></span>CAN</span><span class="pill"><span class="dot" id="dotSer"></span>UART</span></div>
@@ -153,7 +174,8 @@ export function page(appScriptSrc = "/app.js"): string {
           <h3>串口</h3>
           <div class="btns" style="margin-top:0">
             <select aria-label="串口波特率" id="serBaud" style="width:auto">
-              <option value="115200" selected>115200</option>
+              <option value="115200">115200</option>
+              <option value="200000" selected>200000</option>
               <option value="230400">230400</option>
               <option value="460800">460800</option>
               <option value="921600">921600</option>
@@ -285,6 +307,25 @@ export function page(appScriptSrc = "/app.js"): string {
           <div class="small" id="olNote"></div>
           <div class="small" id="olHint" data-testid="ol-hint"></div>
         </div>
+        <div class="sec" id="cogPanel" data-testid="cogging-calibration">
+          <h3>齿槽补偿标定</h3>
+          <p class="small">电机将先正转、再反转进行低速扫描。请卸除负载，保证轴可连续转动整圈，并停止外部 CAN 控制。</p>
+          <fieldset id="cogInputs" style="border:0;padding:0;margin:0" disabled>
+            <div class="hgrid">
+              <div><label class="field" for="cogSpeed">标定速度 rad/s</label><input id="cogSpeed" type="number" min="0.05" max="0.5" step="0.05" value="0.2"/></div>
+              <div><label class="field" for="cogLimit">标定电流上限 A</label><input id="cogLimit" type="number" min="0.02" max="1" step="0.02" value="0.2"/></div>
+              <div><label class="field" for="cogTurns">每方向圈数</label><input id="cogTurns" type="number" min="2" max="10" step="1" value="2"/></div>
+            </div>
+            <label class="check-row"><input type="checkbox" id="cogReady"/>已确认空载、可整圈旋转，外部控制已停止</label>
+          </fieldset>
+          <div class="btns"><button type="button" id="cogStart" disabled>开始双向标定</button><button type="button" id="cogStop" class="danger" disabled>停止标定</button></div>
+          <progress id="cogProgress" max="100" value="0" aria-label="齿槽补偿标定进度" style="width:100%;margin-top:12px"></progress>
+          <div id="cogStatus" role="status" aria-live="polite" class="small">尚未开始 · 默认参数约需 2 分 15 秒</div>
+          <div id="cogResult" class="small mono" style="margin-top:8px"></div><div id="cogCurve"></div>
+          <div class="btns"><button type="button" id="cogUpload" disabled>上传并保存</button><button type="button" id="cogEnable" disabled>启用补偿并保存</button></div>
+          <div class="btns"><button type="button" id="cogExport" class="ghost" disabled>导出补偿表</button><button type="button" id="cogImport" class="ghost">导入补偿表</button><button type="button" id="cogBackup" class="ghost" disabled>导出原表备份</button><input id="cogFile" type="file" accept=".json,application/json" class="hidden"/></div>
+          <p id="cogHint" class="small">连接串口后可用</p>
+        </div>
         ${ptable("drive")}
         <details class="sec advanced">
           <summary title="固件支持斜坡时优先使用固件参数">指令时间</summary>
@@ -339,6 +380,38 @@ export function page(appScriptSrc = "/app.js"): string {
       </div>
 
      </div>
+    </section>
+
+    <section class="view" id="view-audio" data-testid="audio-panel">
+      <div class="block">
+        <div class="bh"><h2>电流音频</h2><span class="small">本地转换 · 电流限幅 · 音乐播放</span></div>
+        <div class="sec">
+          <div class="audio-layout">
+          <div class="audio-card"><fieldset id="audioFileInputs">
+            <legend>1 · 选择音乐</legend>
+            <label class="audio-file-label" for="audioFile">音乐文件或 RAW PCM</label>
+            <input id="audioFile" type="file" accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a,.aac,.raw,.pcm,.s16,.s16le,application/octet-stream" aria-describedby="audioFileHelp audioFileInfo">
+            <p class="small" id="audioFileHelp">MP3 / WAV / FLAC 等浏览器支持的音乐会自动转换。输出为 8000 Hz、单声道、有符号 16 位小端（S16LE）RAW；最长 5 分钟，音乐文件最大 64 MiB。</p>
+            <p class="small">在本机转换并去除直流偏置，无需连接电机，文件不会上传。</p>
+            <p class="small audio-file-info" id="audioFileInfo" role="status" aria-live="polite">尚未选择文件</p>
+            <button type="button" id="audioDownload" class="ghost" disabled>下载 S16LE RAW</button>
+          </fieldset></div>
+          <div class="audio-card"><fieldset id="audioInputs">
+            <legend>2 · 设置播放电流</legend>
+            <div class="audio-fields"><div><label for="audioAxis">注入轴</label><select id="audioAxis"><option value="Q">Q 轴</option><option value="D">D 轴</option></select></div>
+              <div><label for="audioAmp">最高电流 / mA</label><input id="audioAmp" type="number" min="1" max="200" step="1" value="5" aria-describedby="audioAmpLimit"></div></div>
+            <div class="audio-current"><input id="audioAmpRange" type="range" min="1" max="200" step="1" value="5" aria-label="音频峰值电流上限" aria-describedby="audioAmpLimit"><p class="small" id="audioAmpLimit">可调 1–200 mA</p></div>
+            <p class="small">数值是音频峰值上限；普通电流限制仍生效。小幅短测最多 5 mA。</p>
+            <p class="small">先固定电机并移除危险负载。Q 轴可能引起振动或转动，请先做小幅短测。</p>
+            <label class="audio-ready"><input id="audioReady" type="checkbox"> 电机已固定、无危险负载，急停可用</label>
+          </fieldset><p id="audioHint" class="small">连接与固件匹配的 200000 或 230400 串口后可播放。</p></div>
+          </div>
+          <div class="audio-actions"><button type="button" id="audioTest" disabled>300 Hz 小幅短测 · 1 秒</button><button type="button" id="audioPlay" disabled>播放文件</button><button type="button" id="audioPause" class="ghost" disabled>暂停</button><button type="button" id="audioStop" class="danger" disabled>停止音频</button></div>
+          <p id="audioStatus" role="status" aria-live="polite">等待连接</p>
+          <progress id="audioProgress" max="100" value="0" style="width:100%" aria-label="音频播放进度"></progress>
+          <p id="audioStats" class="small mono">进度依据电机已消费的 PCM 样本更新</p>
+        </div>
+      </div>
     </section>
 
     <!-- ================= 调试 ================= -->

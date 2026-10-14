@@ -6,7 +6,11 @@
   "scripts": {
     "build:client": "node scripts/build-client.mjs",
     "build:pages": "node scripts/build-pages.mjs",
-    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
+    "typecheck": "npm run build:client && tsc -p tsconfig.json && tsc -p tsconfig.client.json",
+    "test": "vitest run",
+    "test:ui:audio:convert": "node test/e2e/audio-convert-ui.mjs",
+    "test:hardware:cogging": "node test/e2e/cogging-hardware.mjs",
+    "test:hardware:audio": "node test/e2e/audio-hardware.mjs",
     "deploy": "npm run build:client && wrangler deploy",
     "dev": "npm run build:client && wrangler dev"
   },
@@ -15,7 +19,9 @@
     "@types/w3c-web-serial": "^1.0.8",
     "@types/w3c-web-usb": "^1.0.14",
     "esbuild": "^0.28.2",
+    "puppeteer-core": "^25.13.0",
     "typescript": "^7.0.2",
+    "vitest": "^5.0.4",
     "wrangler": "^4.149.0"
   }
 }

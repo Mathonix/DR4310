@@ -7,6 +7,7 @@ export class SerialLink {
   private writes = 0;
   private readDone: Promise<void> = Promise.resolve();
   private enc = new TextEncoder();
+  baudRate = 0;
   onData: ((chunk: Uint8Array) => void) | null = null;
   onClose: ((reason: string) => void) | null = null;
 
@@ -22,6 +23,7 @@ export class SerialLink {
   async openPort(port: SerialPort, baud: number): Promise<void> {
     await port.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none", bufferSize: 65536 });
     this.port = port;
+    this.baudRate = baud;
     this.running = true;
     const generation = ++this.generation;
     this.readDone = this.readLoop(port, generation);
@@ -62,7 +64,11 @@ export class SerialLink {
 
   /** Writes are serialized: concurrent callers would otherwise fight over the writer lock. */
   writeText(s: string): Promise<void> {
-    const data = this.enc.encode(s);
+    return this.writeBytes(this.enc.encode(s));
+  }
+
+  writeBytes(bytes: Uint8Array): Promise<void> {
+    const data = new Uint8Array(bytes);
     const port = this.port, writes = this.writes, generation = this.generation;
     const run = async () => {
       if (writes !== this.writes || generation !== this.generation) throw new Error("发送已取消");

@@ -103,7 +103,7 @@ const unitOf = (u: string | undefined) => (!u || u === "-" || u === "_" ? "" : u
 /** Units for the DR4310 v3 firmware channel names (TLIST carries names only). */
 const FW_UNITS: Record<string, string> = {
   IDREF: "A", ID: "A", IQREF: "A", IQ: "A", VDUNSAT: "V", VQUNSAT: "V", VDSAT: "V", VQSAT: "V", VBUS: "V", VSAT: "0/1",
-  OMEGA: "rad/s", IA: "A", IB: "A", IC: "A", VD: "V", VQ: "V", RPM: "rpm", POSRAD: "rad", ELECANGLE: "rad", POWER: "W", IQLIMIT: "A",
+  OMEGA: "rad/s", IA: "A", IB: "A", IC: "A", VD: "V", VQ: "V", RPM: "rpm", POSRAD: "rad", ELECANGLE: "rad", POWER: "W", IQLIMIT: "A", ENCRAD: "rad", COGIQ: "A",
 };
 export const fwUnit = (name: string) => FW_UNITS[norm(name)] ?? "";
 

@@ -1,6 +1,6 @@
 /**
  * Optional UART settings protocol (merged firmware "4310_G431KBT6_CurrentAccelLoop_uartcfg", v2.0.0+).
- * USART1 115200 8N1. Downlink: ASCII lines ending in '\n'. Uplink: VOFA JustFloat frames
+ * USART1 230400 8N1. Downlink: ASCII lines ending in '\n'. Uplink: VOFA JustFloat frames
  * (16 x f32 LE + 00 00 80 7F) interleaved with whole '@' reply lines ("@OK CMD ...", "@P KEY=v ...").
  * Older firmware sends JustFloat only and never replies -> detected as "legacy".
  * See firmware docs/UART_PROTOCOL.md.
@@ -12,7 +12,7 @@ export const LINE_MAX = 95;
 // ---------------- parameters (labels; ranges come from the firmware's @P lines) ----------------
 /** Settings pages (电机精灵 layout). Unknown keys from a newer firmware land in "other". */
 export type ParamPage = "motor" | "drive" | "comm" | "other";
-export type ParamGroup = "motor" | "zero" | "vbus" | "can" | "boot" | "link" | "ilim" | "cur" | "spd" | "pos" | "mit" | "ramp" | "other";
+export type ParamGroup = "motor" | "zero" | "vbus" | "can" | "boot" | "link" | "ilim" | "cur" | "spd" | "pos" | "mit" | "cog" | "ramp" | "other";
 export type ParamMeta = { key: string; name: string; unit: string; page: ParamPage; group: ParamGroup; int?: boolean; min: number; max: number; reboot?: boolean; note?: string; v3?: boolean; hidden?: boolean };
 export const PARAM_META: ParamMeta[] = [
   // 电机参数 (v3 keys; hidden when the firmware does not list them in GET)
@@ -46,6 +46,9 @@ export const PARAM_META: ParamMeta[] = [
   { key: "POS_ISEP", name: "积分分离阈值", unit: "rad", page: "drive", group: "pos", min: 0, max: 100 },
   { key: "POS_VLIM", name: "位置环速度限幅", unit: "rad/s", page: "drive", group: "pos", min: 0, max: 500 },
   { key: "POS_VFF", name: "轨迹速度前馈系数", unit: "", page: "drive", group: "pos", min: 0, max: 1, v3: true, note: "0=关闭，1=全量；写入立即生效，同步后断电保留（固件 3.2.0+）" },
+  { key: "COG_EN", name: "齿槽转矩补偿", unit: "0/1", page: "drive", group: "cog", int: true, min: 0, max: 1, v3: true, note: "先完成双向低速标定并上传补偿表；只作用于速度、位置和 MIT 模式" },
+  { key: "COG_GAIN", name: "补偿系数", unit: "", page: "drive", group: "cog", min: 0, max: 1, v3: true, note: "0 关闭 · 1 全量；初次验证从小系数开始" },
+  { key: "COG_LIM", name: "补偿电流限幅", unit: "A", page: "drive", group: "cog", min: 0, max: 1, v3: true, note: "与总电流限幅同时生效，默认 0.2 A" },
   { key: "MIT_KP", name: "MIT 默认 Kp", unit: "", page: "drive", group: "mit", min: 0, max: 500 },
   { key: "MIT_KD", name: "MIT 默认 Kd", unit: "", page: "drive", group: "mit", min: 0, max: 5 },
   { key: "SPD_RAMP_MS", name: "速度指令时间", unit: "ms", page: "drive", group: "ramp", int: true, min: 0, max: 60000, v3: true, note: "固件斜坡；存在时上位机不再做斜坡" },
@@ -62,7 +65,7 @@ export const PARAM_META: ParamMeta[] = [
 ];
 export const PARAM_GROUPS: Record<ParamGroup, string> = {
   motor: "电机本体", zero: "零点", vbus: "电压范围", can: "CAN", boot: "上电行为", link: "串口与安全",
-  ilim: "电流限制", cur: "电流环", spd: "速度环", pos: "位置环", mit: "MIT", ramp: "指令时间（固件斜坡）", other: "其他（新固件参数）",
+  ilim: "电流限制", cur: "电流环", spd: "速度环", pos: "位置环", mit: "MIT", cog: "齿槽转矩补偿", ramp: "指令时间（固件斜坡）", other: "其他（新固件参数）",
 };
 export const PARAM_PAGES: Record<ParamPage, string> = { motor: "电机参数", drive: "驱动参数", comm: "通信参数", other: "其他" };
 export function paramMeta(key: string): ParamMeta | undefined {
@@ -235,6 +238,7 @@ export function parseReply(line: string): Reply {
 }
 
 export type DeviceInfo = {
+  audio?: number; uartBaud?: number; audioQMaxMa?: number; audioDMaxMa?: number;
   fw: string; ver: string; id: number; cfgId: number; mode: number; run: string; drv: number; ae: number; telem: number;
   fault: number; latched: number; vbus: number; calib: number; zero: number; dir: number; cfg: string; seq: number;
   timeout: number; trips: number; drops: number; up: number;
@@ -244,6 +248,8 @@ export type DeviceInfo = {
 export function parseInfo(kv: Record<string, string>): DeviceInfo {
   const n = (k: string) => (kv[k] !== undefined ? Number(kv[k]) : NaN);
   return {
+    audio: n("audio"), uartBaud: n("uart_baud"),
+    audioQMaxMa: n("audio_qmax_ma"), audioDMaxMa: n("audio_dmax_ma"),
     fw: kv.fw ?? "?", ver: kv.ver ?? "?", id: n("id"), cfgId: n("cfg_id"), mode: n("mode"), run: kv.run ?? "?",
     drv: n("drv"), ae: n("ae"), telem: n("telem"), fault: parseInt(kv.fault ?? "", 16), latched: parseInt(kv.latched ?? "", 16),
     vbus: n("vbus"), calib: n("calib"), zero: n("zero"), dir: n("dir"), cfg: kv.cfg ?? "?", seq: n("seq"),
@@ -272,7 +278,8 @@ export function errText(reason: string): string {
 export const JF_TAIL = [0x00, 0x00, 0x80, 0x7f] as const;
 export const JF_CHANNELS = 16;
 export const JF_FRAME_BYTES = JF_CHANNELS * 4 + 4;
-const LINE_SCAN_MAX = 400;
+// INFO may use the firmware's 640-byte buffer as capabilities/diagnostics grow.
+const LINE_SCAN_MAX = 768;
 
 function isTail(b: Uint8Array, i: number): boolean {
   return b[i] === 0x00 && b[i + 1] === 0x00 && b[i + 2] === 0x80 && b[i + 3] === 0x7f;

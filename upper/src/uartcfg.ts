@@ -16,6 +16,9 @@ import {
   parseSetZero, parseTch, parseTrate, readProfile, versionMajor, type ChannelDef, type FaultSnapshot, type Features,
 } from "./features";
 import { positionCmdId, speedCmdId } from "./protocol";
+import { createCoggingPanel } from "./cogging-panel";
+import type { CogReply } from "./cogging-calibration";
+import { createAudioPanel } from "./audio-panel";
 
 export type FwState = "none" | "probing" | "v2" | "legacy" | "rebooting";
 export type UartCfgHost = {
@@ -73,6 +76,71 @@ export function createUartCfg(h: UartCfgHost) {
   const queue: Job[] = [];
   let inflight: Job | null = null;
   let generation = 0;
+  const frameListeners = new Set<(frame: Float32Array, now: number) => void>();
+  let cogPrepare = async () => {};
+  let cogStop = async () => {};
+  let audioRx: ((chunk: Uint8Array) => void) | null = null;
+  const audioCommand = async (line: string): Promise<Record<string, string>> => {
+    const r = await enqueueRequest(line, {note:"电流音频", timeout:1500});
+    if (!r.ok || r.blind || !r.reply) throw new Error(r.err ?? "设备未确认命令");
+    return "kv" in r.reply ? r.reply.kv : {};
+  };
+  const audio = createAudioPanel({
+    ready: () => h.serial.connected && fw === "v2" && info?.audio === 1 && !cog.busy,
+    connected: () => h.serial.connected, baud: () => h.serial.baudRate,
+    firmwareBaud: () => info?.uartBaud,
+    amplitudeCapability: axis => axis === "Q" ? info?.audioQMaxMa : info?.audioDMaxMa,
+    pendingEdits: () => modifiedKeys().length > 0,
+    prepare: () => cogPrepare(), command: audioCommand,
+    write: bytes => h.serial.writeBytes(bytes), cancelWrites: () => h.serial.cancelPending(),
+    receiver: fn => {audioRx=fn;parser.reset();},
+    recover: async () => {
+      const port=h.serial.port,baud=h.serial.baudRate;if(!port)throw new Error("串口断开，请重新连接");
+      await h.serial.close();await sleep(2200);
+      audioRx=null;parser.reset();
+      await h.serial.openPort(port,baud);
+      await audioCommand("PING\n");await audioCommand("STOP\n");
+    },
+    refresh: () => refreshUi(), toast:h.toast,
+  });
+  const cog = createCoggingPanel({
+    ready: () => !audio.busy && h.serial.connected && fw === "v2" && devParams.has("COG_EN") && features.tch && features.trate,
+    pendingEdits: () => modifiedKeys().length > 0,
+    prepare: () => cogPrepare(), stop: () => cogStop(), refresh: () => refreshUi(), toast: h.toast,
+    changed: async driver => {
+      const values=await driver.params();
+      for(const [key,value] of Object.entries(values)) { const old=devParams.get(key); if(old) devParams.set(key,{...old,value}); }
+      renderedSig=""; renderParams();
+      for(const key of devParams.keys()) updateParamRow(key);
+      await driver.command("INFO\n"); h.onParams();
+    },
+    driver: () => {
+      const session = generation;
+      const current = () => session === generation && h.serial.connected;
+      const command = async (line: string, timeout = 1000): Promise<CogReply> => {
+        if(!current()) throw new Error("串口连接已变化");
+        const r = await enqueueRequest(line, {note:"齿槽补偿", timeout});
+        if(!current() || !r.ok || r.blind || !r.reply) throw new Error(r.err ?? "设备未确认命令");
+        const reply = r.reply;
+        return {kv:"kv" in reply ? reply.kv : {}, text:"text" in reply ? reply.text : ""};
+      };
+      return {current, command, now: () => performance.now(), sleep,
+        progress: () => {},
+        channels: (names: string[], hz: number) => { setChannels(names.map((name,idx) => ({idx,name,unit:catalogue.find(c=>c.name===name)?.unit ?? ""}))); trate=hz; },
+        subscribe: (fn: (frame:Float32Array,now:number)=>void) => { frameListeners.add(fn); return () => {frameListeners.delete(fn);}; },
+        params: async () => {
+          const telem = Number((await command("INFO\n")).kv.telem);
+          if(![0,1].includes(telem)) throw new Error("无法读取遥测状态");
+          await command("SET TELEM 0\n");
+          try {
+            const r=await enqueueRequest("GET\n",{note:"标定参数备份",timeout:2500});
+            if(!r.ok || !current()) throw new Error("标定参数备份失败");
+            return {...Object.fromEntries(r.params.filter(p=>p.type==="P").map(p=>p.type==="P"?[p.key,p.value]:["",0])), TELEM:telem};
+          } finally { if(current()) await command(`SET TELEM ${telem}\n`); }
+        },
+      };
+    },
+  });
 
   parser.onChannels = (n) => {
     if (channels.length === n) return;
@@ -93,6 +161,9 @@ export function createUartCfg(h: UartCfgHost) {
     });
   }
   function request(line: string, o: { note?: string; poll?: boolean; timeout?: number } = {}): Promise<Result> {
+    if(audio.busy && (audio.binary || !/^(STOP|AE\s+0)\s*$/i.test(line.trim()))) return Promise.resolve({ok:false,err:"音频期间串口已独占",params:[],lines:[]});
+    if (/^AUDIO(?:\s|$)/i.test(line.trim())) return Promise.resolve({ok:false,err:"请从电流音频页面启动",params:[],lines:[]});
+    if(cog.busy && !/^(STOP|AE\s+0)\s*$/i.test(line.trim())) return Promise.resolve({ok:false,err:"齿槽标定期间操作已锁定",params:[],lines:[]});
     // Includes GET typed in the serial command field, not just the parameter toolbar.
     if (/^GET(?:\s|$)/i.test(line.trim())) {
       return withTelemetryPaused(() => enqueueRequest(line, o), { ok: false, err: "参数读取失败", params: [], lines: [] } as Result);
@@ -175,9 +246,10 @@ export function createUartCfg(h: UartCfgHost) {
   }
 
   function onData(chunk: Uint8Array): void {
+    if(audioRx){audioRx(chunk);return;}
     const { frames, lines } = parser.push(chunk);
     const now = performance.now();
-    for (const fr of frames) h.onFrame(fr, now);
+    for (const fr of frames) { h.onFrame(fr, now); for(const listener of frameListeners) listener(fr,now); }
     for (const l of lines) onLine(l);
   }
 
@@ -230,6 +302,7 @@ export function createUartCfg(h: UartCfgHost) {
   // ---------- connect / probe (auto-connect flow) ----------
   /** Call before SerialLink.open(): the read loop starts inside open(). */
   function prepare(): void {
+    cog.abort("重新连接");
     generation++; cancelPending("重新连接");
     parser.reset(); parser.setChannels(16); channels = LEGACY_CHANNELS; h.onChannels(channels);
     info = null; lastFault = null; devParams.clear(); features = NO_FEATURES(); catalogue = [];
@@ -279,6 +352,8 @@ export function createUartCfg(h: UartCfgHost) {
     h.toast(parser.frames > 0 ? "串口：收到 JustFloat 但无应答 → 旧固件（参数配置不可用，仪表盘仅电流模式）" : "串口：没有收到任何数据，检查接线 / 波特率 / 电源", parser.frames > 0 ? "" : "err");
   }
   function onClosed(): void {
+    audio.abort("串口已断开");audioRx=null;
+    cog.abort("串口断开，标定已取消");
     generation++;
     fw = "none"; info = null;
     cancelPending("串口已断开");
@@ -494,6 +569,8 @@ export function createUartCfg(h: UartCfgHost) {
   }
   const modifiedKeys = () => [...devParams.keys()].filter((k) => document.getElementById("pr_" + k)?.classList.contains("mod"));
   function needV2(): boolean {
+    if(audio.busy) { h.toast("音频期间操作已锁定", "err"); return false; }
+    if(cog.busy) { h.toast("齿槽标定期间操作已锁定", "err"); return false; }
     if (fw === "v2") return true;
     h.toast(fw === "legacy" ? "当前固件没有串口设置功能（旧固件）。请烧录合并版固件 4310_G431KBT6_CurrentAccelLoop_uartcfg" : "请先在「链路」里连接串口", "err");
     return false;
@@ -695,10 +772,11 @@ export function createUartCfg(h: UartCfgHost) {
     if (inf && inf.cfgId !== inf.id) banner.push(`CAN ID 已设为 ${inf.cfgId}，重启后生效（当前 ${inf.id}）。`);
     if (unsaved) banner.push("未保存 · 点击同步");
     if (rebootNeeded) banner.push("需重启生效");
+    if (cog.busy) banner.push("齿槽标定进行中 · 运动和参数操作已锁定");
     $("cfgBanner").title = "速度/位置增益与 CAN 帧共用，下一帧会覆盖；同步写入修改并保存到 Flash";
     $("cfgBanner").textContent = banner.join(" ");
     $("cfgBanner").className = "banner " + (fw === "legacy" ? "warn" : "info");
-    const dis = fw !== "v2";
+    const dis = fw !== "v2" || cog.busy || audio.busy;
     renderBoot();
     renderIlim();
     ["btnSave", "btnReload", "btnDefaults", "btnReboot", "btnGetAll", "btnWriteMod", "btnSync", "btnApplyId", "btnCfgInfo"].forEach((b) => $(b).toggleAttribute("disabled", dis));
@@ -710,6 +788,9 @@ export function createUartCfg(h: UartCfgHost) {
     $("cfgFeat").textContent = fw === "v2"
       ? `固件 v${info?.ver ?? "?"} · 命令表 ${features.help ? "有" : "无"} · 遥测通道 ${features.tlist ? "可选" : "固定 16"} · 故障快照 ${features.fault ? "有" : "无"} · 设零 ${features.setzero ? "有" : "无"}`
       : "—";
+    document.querySelectorAll<HTMLElement>("#cfgView .sec").forEach(el => { if(el.id !== "cogPanel" && !el.closest("#cogPanel")) el.inert=cog.busy || audio.busy; });
+    cog.refresh();
+    audio.refresh();
   }
 
   let bootAeConfirmed = false;
@@ -838,13 +919,14 @@ export function createUartCfg(h: UartCfgHost) {
 
   let hbTick = 0;
   async function heartbeat(): Promise<void> {
-    if (!h.serial.connected || fw !== "v2" || !$<HTMLInputElement>("cfgHb").checked || inflight || queue.length) return;
+    if (audio.busy || cog.busy || !h.serial.connected || fw !== "v2" || !$<HTMLInputElement>("cfgHb").checked || inflight || queue.length) return;
     hbTick++;
     const r = await request(hbTick % 2 ? "PING\n" : "INFO\n", { poll: true, timeout: 800 });
     if (!r.ok && r.timeout) missedPolls++;
   }
 
-  function init(stopNow: (reason: string) => Promise<void>): void {
+  function init(stopNow: (reason: string) => Promise<void>, prepareCog = stopNow): void {
+    cogPrepare=()=>prepareCog("接管串口前停机"); cogStop=()=>stopNow("用户停止标定"); cog.init();audio.init();
     renderParams();
     $("cfgPages").addEventListener("click", (e) => {
       const b = (e.target as HTMLElement).closest("button[data-page]") as HTMLButtonElement | null;
@@ -909,6 +991,8 @@ export function createUartCfg(h: UartCfgHost) {
   }
 
   return {
+    get audioBusy(): boolean {return audio.busy;}, get audioBinary():boolean{return audio.binary;}, abortAudio:audio.abort, stopAudio:audio.stop,
+    get coggingBusy(): boolean {return cog.busy;}, abortCogging: cog.abort,
     parser, prepare, onData, onOpened, onClosed, refreshUi, init, request, run, setZero, clearFaults, readFault, showPage, importProfile, ensurePositionTelemetry,
     get fw(): FwState { return fw; },
     get unsaved(): boolean { return unsaved; },
