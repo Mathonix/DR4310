@@ -3,6 +3,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-08",
   "workers_dev": true,
+  "kv_namespaces": [{ "binding": "MUSIC_KV", "id": "40166dfdc0034ff697a14cb6540f6b7b" }],
+  "observability": { "enabled": true, "head_sampling_rate": 0.1 },
   "routes": [
     {
       "pattern": "dr4310.233688.xyz",

@@ -9,6 +9,7 @@
 - 齿槽转矩补偿：512 点角度查表、网页发起双向低速标定、Flash 保存，默认关闭。使用方法见 [补偿与标定说明](docs/COGGING_COMPENSATION.md)。
 - `upper/` 提供网页上位机，用于运动调试、参数配置、实时曲线和日志导出。
 - 音乐模式：Q/D 轴电流音频、短 TX 自动协商、暂停/停止及通信故障保护。上位机可将 MP3/WAV/FLAC 等音乐本地转换为 8 kHz 单声道 S16LE RAW，下载或直接播放；Q 轴峰值最高 2 A，D 轴最高 1.5 A，仍受普通 IQ_LIM 限制。操作和电流限幅见 [上位机说明](upper/README.md)。
+- [音乐列表](docs/MUSIC_LIBRARY.md)：访问码保护的云端库跨电脑同步、点击播放、进度跳转、后台串口线程和独立播放窗口。
 
 `feature/music-mode` 保存固件 3.4.5 和配套音乐上位机。标准 TX 使用 2048 样本缓冲、6 帧窗口、20 ms STATUS；默认短 TX 使用 4096 样本缓冲、12 帧窗口、100 ms STATUS。J-Link 回传仍有坏 CRC STATUS；实机只验证了小电流播放，未做 2 A / 1.5 A 功率级验收。详见 [电流扩展与验收](docs/AUDIO_2A_EXTENSION.md) 和 [协议实现记录](docs/AUDIO_UART_V1_IMPLEMENTATION.md)。
 

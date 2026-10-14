@@ -20,5 +20,6 @@ const { page } = await import(
 await fs.mkdir(output, { recursive: true });
 await fs.writeFile(path.join(output, "index.html"), page("./app.js"), "utf8");
 await fs.copyFile(path.join(root, "dist", "client.js"), path.join(output, "app.js"));
+await fs.copyFile(path.join(root, "dist", "serial-worker.js"), path.join(output, "serial-worker.js"));
 await fs.writeFile(path.join(output, ".nojekyll"), "");
 console.log("GitHub Pages site:", output);

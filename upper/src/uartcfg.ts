@@ -93,6 +93,8 @@ export function createUartCfg(h: UartCfgHost) {
     currentLimitA: () => devParams.get("IQ_LIM")?.value,
     pendingEdits: () => modifiedKeys().length > 0,
     prepare: () => cogPrepare(), command: audioCommand,
+    background: () => h.serial.backgroundAudio,
+    makeSession: io => h.serial.audioSession(io),
     write: bytes => h.serial.writeBytes(bytes), cancelWrites: () => h.serial.cancelPending(),
     receiver: fn => {audioRx=fn;parser.reset();},
     recover: async () => {
@@ -992,7 +994,7 @@ export function createUartCfg(h: UartCfgHost) {
   }
 
   return {
-    get audioBusy(): boolean {return audio.busy;}, get audioBinary():boolean{return audio.binary;}, abortAudio:audio.abort, stopAudio:audio.stop,
+    get audioBusy(): boolean {return audio.busy;}, get audioBinary():boolean{return audio.binary;}, get audioBackground():boolean{return audio.busy && h.serial.backgroundAudio;}, get selectedMusic():string{return audio.selectedMusic;}, abortAudio:audio.abort, stopAudio:audio.stop,
     get coggingBusy(): boolean {return cog.busy;}, abortCogging: cog.abort,
     parser, prepare, onData, onOpened, onClosed, refreshUi, init, request, run, setZero, clearFaults, readFault, showPage, importProfile, ensurePositionTelemetry,
     get fw(): FwState { return fw; },

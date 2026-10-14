@@ -63,8 +63,13 @@ export function audioTestTone(): Uint8Array {
   for (let i = 0; i < 8000; i++) d.setInt16(i * 2, Math.round(16000 * Math.sin(2 * Math.PI * 300 * i / 8000)), true);
   return bytes;
 }
+export function audioSeekSample(seconds: number, samples: number): number {
+  if (!Number.isFinite(seconds) || !Number.isSafeInteger(samples) || samples < 1) return 0;
+  return Math.max(0, Math.min(samples - 1, Math.round(seconds * 8000)));
+}
 
-type Io = { write(bytes: Uint8Array): Promise<void>; cancel(): void; connected(): boolean; now(): number; sleep(ms: number): Promise<void>; changed(status: AudioStatus | null): void };
+export type AudioIo = { write(bytes: Uint8Array): Promise<void>; cancel(): void; connected(): boolean; now(): number; sleep(ms: number): Promise<void>; changed(status: AudioStatus | null): void };
+export type AudioPlayer = Pick<AudioSession, "status" | "sid" | "binary" | "retries" | "capacity" | "window" | "lowTx" | "receive" | "open" | "play" | "pause" | "resume" | "cancel" | "exit"> & { parser: Pick<AudioStatusParser, "rejected"> };
 export class AudioSession {
   readonly parser = new AudioStatusParser();
   status: AudioStatus | null = null;
@@ -83,7 +88,7 @@ export class AudioSession {
   private lastSendAt = 0;
   private closed = false;
   private exitTask: Promise<boolean> | null = null;
-  constructor(private io: Io) {}
+  constructor(private io: AudioIo) {}
   receive(chunk: Uint8Array): void {
     let offset = 0;
     if (!this.sid && this.binary) {

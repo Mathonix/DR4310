@@ -40,6 +40,16 @@ Pop-Location
 
 ## 当前状态（2026-10-14）
 
+### 音乐列表 / 云端同步 / 后台播放已完成
+
+用户要求音乐列表、跨电脑同步、进度调节及离开页面继续播放。配套网页已部署云端私有音乐库（KV binding MUSIC_KV，访问码为 Worker secret MUSIC_LIBRARY_KEY）、本机 IndexedDB 缓存、多文件转换上传、列表点击播放/删除、内容去重、进度跳转、后台 dedicated worker 与独立播放窗口。访问码仅保存在本机 `logs/music_library_20261014/music-library-access.txt`，不入库。其他电脑使用同一码，关闭主页面前需在独立窗口连接并播放。说明见 [MUSIC_LIBRARY.md](docs/MUSIC_LIBRARY.md)。
+
+325 项测试、类型检查、Pages 构建、Worker dry run、本地跨浏览器/后台/独立窗口回归和线上真实上传/另一隔离浏览器读取验证通过。线上验收文件已删除。Cloudflare API deployment id `d2a4fc9c7d624a07a9bc10d61b27c0d9`；app.js SHA256 `9b984ee83aa0e2bd46f7624f44b4fe1315c5d786a20d224a2c59a402654b70b8`，serial-worker.js SHA256 `b20612e3c7da6aad8c3e3d9c97e19e6c3defb68fb98529cb452e24fcabed78dc`，与本地一致。CLI Cloudflare OAuth 刷新失败，本次通过已连接 Cloudflare API 发布，不要记录凭据。
+
+固件仍是 3.4.5。D 轴 1 mA 的 6 秒实机播放中跳到 2 秒，隐藏标签并阻塞页面线程 650 ms 后新片段完整消费 32000 样本、ACK=200、欠载/故障为 0、重传 0；解析器拒绝 9 个坏状态帧。正式网页和 worker 通过测试 WebSocket/stdio 适配器连接 COM5，原生串口选择未能在自动化浏览器中完成，不能把此验收描述为原生 Web Serial 验收。原生路径按浏览器授权的唯一 getInfo 匹配委托到 worker。
+
+测试后 IDLE/drv=0/ae=0、uart_errors=0，全部参数、校准和齿槽元数据与测试前一致。用户已将普通 IQ_LIM 调至 **2.4 A**，本次保留；后文 1.9 A 是上一轮历史记录。齿槽 CRC 仍为 0x0BECE80E。COM5 已释放，可以重新连接。本机报告与截图在 `logs/music_library_20261014/`。
+
 ### 固件 3.4.5 — 音频 UART V1 + 低 TX 模式
 
 音乐模式分支 `feature/music-mode`，从已实测的 `feature/audio-uart-v1` 工作树整理，基线 `a104bb6`。固件提交 `b0809b3` 保留 3.3.0 齿槽补偿并加入 3.4.4 音频/短 TX；上位机提交 `60b7d01` 包含电流音频、本地音乐转换及完整测试。发布目标为 `origin/feature/music-mode`，该分支独立于 main。

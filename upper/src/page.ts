@@ -26,6 +26,14 @@ export function page(appScriptSrc = "/app.js"): string {
 <script>(function(){try{var t=localStorage.getItem("dr4310-theme");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme="dark";}})();</script>
 <style>${BASE_CSS}${CONSOLE_CSS}
 #view-audio .audio-layout{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:20px}
+#view-audio .music-list{display:grid;gap:8px;margin-top:14px}
+#view-audio .music-row{display:flex;align-items:center;gap:8px;padding:10px;border:1px solid var(--line);border-radius:8px;min-width:0}
+#view-audio .music-row.active{border-color:var(--accent)}
+#view-audio .music-name{flex:1;min-width:0;overflow-wrap:anywhere}
+#view-audio .music-name strong{display:block;font-weight:500}
+#view-audio .music-row button{flex-shrink:0;padding:6px 10px}
+#view-audio .audio-timeline{display:flex;gap:12px;align-items:center;margin-top:12px}
+#view-audio .audio-timeline input{flex:1;min-width:0}
 #view-audio fieldset{min-width:0;border:0;padding:0;margin:0}
 #view-audio legend{font-size:14px;font-weight:600;margin-bottom:16px;color:var(--label)}
 #view-audio .audio-card{min-width:0;border:1px solid var(--line);border-radius:var(--radius);padding:20px;background:var(--bg-2)}
@@ -390,9 +398,9 @@ export function page(appScriptSrc = "/app.js"): string {
           <div class="audio-card"><fieldset id="audioFileInputs">
             <legend>1 · 选择音乐</legend>
             <label class="audio-file-label" for="audioFile">音乐文件或 RAW PCM</label>
-            <input id="audioFile" type="file" accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a,.aac,.raw,.pcm,.s16,.s16le,application/octet-stream" aria-describedby="audioFileHelp audioFileInfo">
+            <input id="audioFile" type="file" multiple accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a,.aac,.raw,.pcm,.s16,.s16le,application/octet-stream" aria-describedby="audioFileHelp audioFileInfo">
             <p class="small" id="audioFileHelp">MP3 / WAV / FLAC 等浏览器支持的音乐会自动转换。输出为 8000 Hz、单声道、有符号 16 位小端（S16LE）RAW；最长 5 分钟，音乐文件最大 64 MiB。</p>
-            <p class="small">在本机转换并去除直流偏置，无需连接电机，文件不会上传。</p>
+            <p class="small">音乐在本机转为 S16LE，连接云端音乐库后自动上传；其他电脑使用同一访问码可直接播放。</p>
             <p class="small audio-file-info" id="audioFileInfo" role="status" aria-live="polite">尚未选择文件</p>
             <button type="button" id="audioDownload" class="ghost" disabled>下载 S16LE RAW</button>
           </fieldset></div>
@@ -406,9 +414,16 @@ export function page(appScriptSrc = "/app.js"): string {
             <label class="audio-ready"><input id="audioReady" type="checkbox"> 电机已固定、无危险负载，急停可用</label>
           </fieldset><p id="audioHint" class="small">连接与固件匹配的 200000 或 230400 串口后可播放。</p></div>
           </div>
+          <div class="audio-actions"><label for="audioLibraryKey">音乐库访问码</label><input id="audioLibraryKey" type="password" autocomplete="off" placeholder="仅在当前浏览器保存" aria-describedby="audioCloudStatus"><button type="button" id="audioLibrarySync" class="ghost">连接 / 刷新云端音乐库</button></div>
+          <p id="audioCloudStatus" class="small" role="status">填写访问码后可在多台电脑同步，未同步的音乐保留在本机。</p>
+          <div class="music-list" id="audioLibrary" aria-label="已保存的音乐列表"></div>
+          <p class="small" id="audioLibraryHint" role="status">正在读取音乐列表…</p>
           <div class="audio-actions"><button type="button" id="audioTest" disabled>300 Hz 小幅短测 · 1 秒</button><button type="button" id="audioPlay" disabled>播放文件</button><button type="button" id="audioPause" class="ghost" disabled>暂停</button><button type="button" id="audioStop" class="danger" disabled>停止音频</button></div>
+          <button type="button" id="audioDetach" class="ghost">打开独立播放窗口</button>
+          <p class="small" id="audioBackgroundHint">切换页面或标签时由后台串口线程继续播放。关闭主页面前，请在独立窗口连接并播放；保持播放窗口和浏览器运行。</p>
           <p id="audioStatus" role="status" aria-live="polite">等待连接</p>
           <progress id="audioProgress" max="100" value="0" style="width:100%" aria-label="音频播放进度"></progress>
+          <div class="audio-timeline"><input id="audioSeek" type="range" min="0" max="0" step="0.01" value="0" disabled aria-label="调整音乐播放进度"><output id="audioSeekTime" for="audioSeek" class="small mono">0:00 / 0:00</output></div>
           <p id="audioStats" class="small mono">进度依据电机已消费的 PCM 样本更新</p>
         </div>
       </div>

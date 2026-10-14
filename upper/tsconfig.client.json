@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/client.ts", "src/protocol.ts", "src/chart.ts", "src/serial.ts", "src/pcan.ts"]
+  "include": ["src/client.ts", "src/protocol.ts", "src/chart.ts", "src/serial.ts", "src/serial-worker.ts", "src/pcan.ts"]
 }

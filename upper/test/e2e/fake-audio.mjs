@@ -1,4 +1,4 @@
-export function installFakeAudio(baud=230400,lowTx=false) {
+export function installFakeAudio(baud=230400,lowTx=false,workerMode=false) {
   let ctl=null,binary=false,sid=40,ack=0,played=0,used=0,state=0,ended=false,partial=false,lastInput=0;
   const capacity=lowTx?4096:2048,windowSize=lowTx?12:6;let lastStatusTx=0;
   const enc=new TextEncoder(), ram={TELEM:1,IQ_LIM:1.9,OL_EN:1,OL_IQ:2.2,OL_TIME_S:2,TIMEOUT_MS:0,BOOT_MODE:0,BOOT_AE:0};
@@ -43,5 +43,6 @@ export function installFakeAudio(baud=230400,lowTx=false) {
     }});
   },close:async()=>{ctl=null;port.readable=port.writable=null;},getInfo:()=>({usbVendorId:0x1366})};
   setInterval(()=>{if(binary){const before=state;if(state===1||state===3){const count=Math.min(used,40);used-=count;played+=count;if(ended&&!used){state=4;dev.mode=0;}}if(Date.now()-lastInput>=300){state=5;dev.mode=0;}if(!lowTx||state!==before||Date.now()-lastStatusTx>=100)status();}},5);
-  const serial=new EventTarget();serial.requestPort=async()=>port;serial.getPorts=async()=>[];Object.defineProperty(navigator,"serial",{value:serial,configurable:true});
+  if(workerMode)Object.defineProperty(port,Symbol.toStringTag,{value:"SerialPort"});
+  const serial=new EventTarget();serial.requestPort=async()=>port;serial.getPorts=async()=>workerMode?[port]:[];Object.defineProperty(navigator,"serial",{value:serial,configurable:true});
 }

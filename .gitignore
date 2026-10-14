@@ -157,6 +157,7 @@
 !/docs/AUDIO_REPAIR_20261014.md
 !/docs/AUDIO_1A_EXTENSION.md
 !/docs/AUDIO_2A_EXTENSION.md
+!/docs/MUSIC_LIBRARY.md
 !/docs/UART_BIDIR_DIAGNOSTIC_20261014.md
 !/upper/test/audio-protocol.test.ts
 !/upper/test/audio-session.test.ts
@@ -187,6 +188,7 @@
 !/upper/package.json
 !/upper/package-lock.json
 !/upper/tsconfig.json
+!/upper/worker-configuration.d.ts
 !/upper/tsconfig.client.json
 !/upper/wrangler.jsonc
 !/upper/README.md
@@ -201,6 +203,7 @@
 !/upper/test/ui.test.ts
 !/upper/test/uartcfg.test.ts
 !/upper/test/audio-convert.test.ts
+!/upper/test/music-api.test.ts
 !/upper/test/auto-enable.test.ts
 !/upper/test/dashboard.test.ts
 !/upper/test/features.test.ts
@@ -214,6 +217,7 @@
 !/upper/test/e2e/cogging-hardware.mjs
 !/upper/test/e2e/browser.mjs
 !/upper/test/e2e/audio-convert-ui.mjs
+!/upper/test/e2e/audio-library-ui.mjs
 !/tools/browser_serial_bridge.py
 
 # Required CMSIS and HAL dependencies with licenses

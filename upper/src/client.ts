@@ -1195,9 +1195,17 @@ function init(): void {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "hidden") return;
     dash.stopWave();
-    if (cfg.audioBusy || cfg.coggingBusy || ($("wdHidden") as HTMLInputElement).checked) void safeStop("页面隐藏");
+    if (cfg.audioBusy ? !cfg.audioBackground : cfg.coggingBusy || ($("wdHidden") as HTMLInputElement).checked) void safeStop("页面隐藏");
   });
   window.addEventListener("pagehide", () => { if (cfg.audioBusy || cfg.coggingBusy || ($("wdHidden") as HTMLInputElement).checked) void safeStop("页面关闭"); });
+  $("audioDetach").addEventListener("click", () => {
+    if (cfg.audioBusy) return;
+    const url = new URL(location.href); url.searchParams.set("player", "1");
+    if (cfg.selectedMusic) url.searchParams.set("track", cfg.selectedMusic);
+    const player = window.open(url, "dr4310-music-player", "popup,width=920,height=850");
+    if (!player) { toast("请允许弹出窗口后重试", "err"); return; }
+    void serDisconnect(true).then(() => toast("主页面串口已释放，请在独立窗口连接并播放", "ok"));
+  });
   navigator.usb?.addEventListener("connect", (ev: USBConnectionEvent) => {
     if (autoRe.checked && !pcan && ev.device.vendorId === 0x0c72) void pcanOpen(ev.device, true);
   });
@@ -1230,6 +1238,12 @@ function init(): void {
     if (!cfg.audioBusy && (canDriving && now - canDrivingT > 1500 && !meas("can").fresh || serialDriving && now - serialDrivingT > 2500 && !meas("serial").fresh)) void safeStop("反馈中断");
   }, 100);
   cfg.refreshUi();
+  if (new URL(location.href).searchParams.get("player") === "1") {
+    document.title = "DR4310 · 独立音乐播放器";
+    document.querySelector<HTMLButtonElement>('[data-view="audio"]')?.click();
+    $("audioDetach").hidden = true;
+    $("audioBackgroundHint").textContent = "这是独立播放窗口。在此连接电机并播放后，可关闭原主页面；请保留此窗口和浏览器。关闭此窗口会停止播放。";
+  }
   initTheme(() => Object.values(charts).forEach((c) => c.markDirty()));
   refreshUi();
 }

@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "files": ["src/index.ts"]
+  "files": ["worker-configuration.d.ts", "src/index.ts"]
 }

@@ -11,6 +11,7 @@ test/*
 !test/audio-protocol.test.ts
 !test/audio-session.test.ts
 !test/audio-convert.test.ts
+!test/music-api.test.ts
 !test/auto-enable.test.ts
 !test/cogging.test.ts
 !test/dashboard.test.ts
@@ -29,6 +30,7 @@ test/e2e/*
 !test/e2e/fake-audio.mjs
 !test/e2e/audio-hardware.mjs
 !test/e2e/audio-convert-ui.mjs
+!test/e2e/audio-library-ui.mjs
 !test/e2e/browser.mjs
 !test/e2e/cogging-hardware.mjs
 DESIGN_PLAN.md
