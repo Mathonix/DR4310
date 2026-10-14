@@ -46,7 +46,7 @@ class MotorAudio {
   bool stopRequested() const { return stop_requested_.load(std::memory_order_acquire); }
   bool takeStopRequest() { return stop_requested_.exchange(false,std::memory_order_acq_rel); }
   Axis axis() const { return axis_; }
-  float amplitudeA() const { return float(amplitude_ma_)*.001f; }
+  float amplitudeA() const { return float(amplitude_ma_)/1000.0f; }
   Status status(Reason reason=Reason::Ok) const;
   bool asciiReady() const { return !binary(); }
  private:

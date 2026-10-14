@@ -2,7 +2,7 @@
 
 音乐发布分支：`feature/music-mode`，从已实测的 `feature/audio-uart-v1` 工作树整理。HEAD 基线 `a104bb646e1de1fbf4b3d47fea90eaceb91c0cdb`，实际开发基于已有的 3.3.0 齿槽补偿工作树；分支保留固件、配套上位机、协议向量和测试。早期 AUDIO 专属增量与开发前文件快照留在本机 `logs/audio_uart_v1_20261014/audio-only.patch` 和 `baseline/`，原始日志及构建产物不进入仓库。本文后续 3.4.0/3.4.3 的验收项按历史记录阅读。
 
-当前构建版本为 **3.4.4**，应用仍编译为电机 ID2。新增运行时音频功能，不修改 Flash 配置格式、CAN 字节格式、电流 PI、PWM/ADC 时序或旧遥测字段。冻结合同原文保留在 [UART_AUDIO_PROTOCOL_V1.md](UART_AUDIO_PROTOCOL_V1.md)。当前短 TX 是使用 V1 帧格式的扩展，缓冲容量、窗口和回传节拍与冻结合同不同；标准 TX 保留原缓冲、窗口和节拍。Q 轴峰值参数按用户要求扩展到 1 A，D 轴仍为 200 mA，具体能力协商见 [AUDIO_1A_EXTENSION.md](AUDIO_1A_EXTENSION.md)。下文 3.4.0 短测为历史验收；旧串口检查记录见 [AUDIO_REPAIR_20261014.md](AUDIO_REPAIR_20261014.md)。
+当前构建版本为 **3.4.5**，应用仍编译为电机 ID2。新增运行时音频功能，不修改 Flash 配置格式、CAN 字节格式、电流 PI、PWM/ADC 时序或旧遥测字段。冻结合同原文保留在 [UART_AUDIO_PROTOCOL_V1.md](UART_AUDIO_PROTOCOL_V1.md)。当前短 TX 是使用 V1 帧格式的扩展，缓冲容量、窗口和回传节拍与冻结合同不同；标准 TX 保留原缓冲、窗口和节拍。Q 轴峰值参数按用户要求扩展到 **2 A**，D 轴为 **1.5 A**，仍受普通 IQ_LIM 限制，具体能力协商和最新小电流验收见 [AUDIO_2A_EXTENSION.md](AUDIO_2A_EXTENSION.md)。下文 3.4.0 短测为历史验收；旧串口检查记录见 [AUDIO_REPAIR_20261014.md](AUDIO_REPAIR_20261014.md)。
 
 ## 第一条续作：短 TX 接入与问题修复
 
@@ -59,7 +59,7 @@ guard=128、prefill=800、PCM 8 kHz S16LE、帧类型/CRC/STATUS 字节格式不
 
 20 kHz 内只执行门控、原子 SPSC 读取、整数相位 `+2 mod 5`、线性插值、幅度及电流矢量限幅。CRC、帧解析、STATUS、UART 入队均在主循环。无 ISR malloc/new/printf/CRC/UART 或 sin。Q 仅加到局部 iq_cmd，D 仅加到局部 id_cmd；原 IdRef/IqRef 不回写。`FOCState.audio_cmd_a` 单独记录重采样给定（合成矢量限幅前），供调试采样。
 
-## 会话与异常语义
+## 会话与异常语义（3.4.0 历史基线；当前幅度和短 TX 扩展见上文）
 
 - OPEN 只接受 Q/D 和十进制整数 1..200，要求 CURRENT、无 AE/校准/开环/辨识、有效校准/编码器/电流采样、驱动已由原 gate 使能、无锁存故障。TELEM 必须关闭、无 GET/REBOOT/COG 上传/旧 TX 排队冲突。峰值不得超过现有持续 IQ_LIM，不提高任何限制。
 - OPEN 时先准备二进制解析，再原子入队精确的 ASCII OK 行；它在同一 FIFO 中先于 STATUS。旧 ASCII 回复及 JustFloat 的入口在会话期间屏蔽。
@@ -79,7 +79,7 @@ guard=128、prefill=800、PCM 8 kHz S16LE、帧类型/CRC/STATUS 字节格式不
 2. 消费到连续 **800 个相同非零 PCM**（100 ms 有效播放时间）立即 SAFETY_FAULT；零值不触发，暂停不计时间。此保护识别持续常值，不代替上位机对带变化音频的 DC 去除。
 3. 错误帧的 sid 不可信时，CRC_ERROR 使用当前有效会话 sid 回复。
 
-## 保护分析
+## 保护分析（3.4.0 历史基线；当前幅度扩展见上文）
 
 | 条件 | 注入/驱动动作 | 反馈与原保护 |
 | --- | --- | --- |

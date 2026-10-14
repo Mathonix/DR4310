@@ -38,14 +38,18 @@ int main(){
   static_assert(kLowTxMode ? kPcmCapacity==4096 && kWindow==12 : kPcmCapacity==2048 && kWindow==6);
   {
     Fixture f;f.audio.init(Sink::send,&f.sink);
-    assert(f.audio.open(Axis::Q,1001,0)==0);
-    assert(f.audio.open(Axis::D,201,0)==0);
-    f.sid=f.audio.open(Axis::Q,1000,0);assert(f.sid&&f.audio.amplitudeA()==1.0f);
+    assert(f.audio.open(Axis::Q,2001,0)==0);
+    assert(f.audio.open(Axis::D,1501,0)==0);
+    f.sid=f.audio.open(Axis::Q,2000,0);assert(f.sid&&f.audio.amplitudeA()==2.0f);
     for(unsigned i=0;i<5;i++)f.send(Type::Data,i);
     float peak=0;
-    for(unsigned i=0;i<1000;i++){const float a=f.audio.tick20kHz();assert(std::fabs(a)<=1.000001f);peak=std::max(peak,std::fabs(a));}
-    assert(peak>.55f); // ensure the old 0.2 A ceiling is actually removed
-    f.audio.init(Sink::send,&f.sink);assert(f.audio.open(Axis::D,200,0));
+    for(unsigned i=0;i<1000;i++){const float a=f.audio.tick20kHz();assert(std::fabs(a)<=2.000001f);peak=std::max(peak,std::fabs(a));}
+    assert(peak>1.1f); // ensure the old 1 A ceiling is actually removed
+    f.audio.init(Sink::send,&f.sink);f.sid=f.audio.open(Axis::D,1500,0);assert(f.sid&&f.audio.amplitudeA()==1.5f);
+    for(unsigned i=0;i<5;i++)f.send(Type::Data,i);
+    peak=0;
+    for(unsigned i=0;i<1000;i++){const float a=f.audio.tick20kHz();assert(std::fabs(a)<=1.500001f);peak=std::max(peak,std::fabs(a));}
+    assert(peak>.8f);
   }
   if(kLowTxMode){
     {
@@ -192,10 +196,11 @@ int main(){
     float d=0,q=.02f;LimitAudioVector(d,q,-.2f,false,.2f,.1f);assert(d<0&&q>0&&std::hypot(d,q)<=.100001f);
     d=q=0;LimitAudioVector(d,q,-.02f,true,.02f,1);assert(d==0&&q==-.02f);
     d=q=0;LimitAudioVector(d,q,.02f,false,.02f,1);assert(d==.02f&&q==0);
-    d=q=0;LimitAudioVector(d,q,1,true,1,1.9f);assert(d==0&&q==1);
-    d=q=0;LimitAudioVector(d,q,-1,true,1,.5f);assert(d==0&&q==-.5f);
-    d=q=0;LimitAudioVector(d,q,1,false,1,1.9f);assert(d==.2f&&q==0);
-    d=.8f;q=0;LimitAudioVector(d,q,1,true,1,1.9f);assert(d==.2f&&q==1);
+    d=q=0;LimitAudioVector(d,q,2,true,2,2.5f);assert(d==0&&q==2);
+    d=q=0;LimitAudioVector(d,q,-2,true,2,1.9f);assert(d==0&&q==-1.9f);
+    d=q=0;LimitAudioVector(d,q,1.8f,false,1.8f,2);assert(d==1.5f&&q==0);
+    d=1.6f;q=0;LimitAudioVector(d,q,1,true,2,2.5f);assert(d==1.5f&&q==1);
+    d=1.5f;q=0;LimitAudioVector(d,q,2,true,2,2);assert(std::hypot(d,q)<=2.000001f&&d<=1.5f&&q<=2);
   }
   // Genuine concurrent SPSC publication, including many complete wraps.
   {

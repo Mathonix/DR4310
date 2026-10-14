@@ -3,6 +3,7 @@ import { prepareAudioFile } from "./audio-convert";
 type Host = {
   ready(): boolean; connected(): boolean; baud(): number; firmwareBaud(): number | undefined; pendingEdits(): boolean;
   amplitudeCapability(axis: "Q" | "D"): number | undefined;
+  currentLimitA(): number | undefined;
   prepare(): Promise<void>; command(line: string): Promise<Record<string, string>>;
   write(bytes: Uint8Array): Promise<void>; cancelWrites(): void;
   receiver(fn: ((chunk: Uint8Array) => void) | null): void;
@@ -27,18 +28,20 @@ export function createAudioPanel(h: Host) {
       lastMax = max;
     }
     const amplitude = Number(amp.value), validAmplitude = Number.isInteger(amplitude) && amplitude >= 1 && amplitude <= max;
+    const limit = h.currentLimitA(), withinLimit = limit === undefined || !Number.isFinite(limit) || amplitude / 1000 <= limit;
     if (validAmplitude) range.value = amp.value;
     $("audioAmpLimit").textContent = `可调 1–${max} mA · ${axis === "Q" ? "Q 轴转矩电流" : "D 轴磁链电流"}`;
     $<HTMLFieldSetElement>("audioInputs").disabled = busy || !ready;
     $<HTMLFieldSetElement>("audioFileInputs").disabled = busy || loading;
     $("audioDownload").toggleAttribute("disabled", !pcm || busy || loading);
     const safe = $<HTMLInputElement>("audioReady").checked;
-    $("audioPlay").toggleAttribute("disabled", busy || loading || !ready || !safe || !pcm || !validAmplitude);
+    $("audioPlay").toggleAttribute("disabled", busy || loading || !ready || !safe || !pcm || !validAmplitude || !withinLimit);
     $("audioTest").toggleAttribute("disabled", busy || loading || !ready || !safe || !validAmplitude);
     $("audioStop").toggleAttribute("disabled", !busy);
     $("audioPause").toggleAttribute("disabled", !busy || !session?.sid || ![1, 2, 3].includes(session.status?.state ?? -1));
     $("audioPause").textContent = session?.status?.state === 2 ? "继续" : "暂停";
-    $("audioHint").textContent = busy ? `音频独占串口，${session?.lowTx ? "短 TX 模式已生效（100 ms 状态回传）" : "标准 TX 模式"}。请保持页面在前台。` : ready ? `${axis} 轴峰值上限 ${max} mA。先做小幅短测，再播放文件；停止与 Esc 均可中止。` : "连接与固件匹配的 200000 或 230400 串口后可用。";
+    const limitHint = limit !== undefined && Number.isFinite(limit) ? `当前普通电流限制 IQ_LIM=${limit} A。${withinLimit ? "" : `所选峰值超过该限制，请先在参数配置中将 IQ_LIM 设为至少 ${amplitude / 1000} A。`}` : "";
+    $("audioHint").textContent = busy ? `音频独占串口，${session?.lowTx ? "短 TX 模式已生效（100 ms 状态回传）" : "标准 TX 模式"}。请保持页面在前台。` : ready ? `${axis} 轴峰值上限 ${max} mA。${limitHint}先做小幅短测，再播放文件；停止与 Esc 均可中止。` : "连接与固件匹配的 200000 或 230400 串口后可用。";
     if (session?.status) {
       const s = session.status;
       $<HTMLProgressElement>("audioProgress").value = samples ? 100 * s.played / samples : 0;
@@ -83,6 +86,10 @@ export function createAudioPanel(h: Host) {
       if (initial.audio !== "1" || Number(initial.uart_baud) !== h.baud() || ![200000,230400].includes(h.baud()) || initial.calib !== "1" || Number(initial.fault) || Number(initial.latched)) throw new Error("固件能力、校准或安全状态不满足 AUDIO 要求");
       const verifiedMax = audioAmplitudeMax(axis, Number(initial[axis === "Q" ? "audio_qmax_ma" : "audio_dmax_ma"]));
       if (amplitude > verifiedMax) throw new Error(`${axis} 轴固件峰值上限为 ${verifiedMax} mA`);
+      await cmd("GET IQ_LIM\n");
+      const limit = h.currentLimitA(), requested = test ? Math.min(5, amplitude) : amplitude;
+      if (limit === undefined || !Number.isFinite(limit)) throw new Error("无法读取普通电流限制 IQ_LIM");
+      if (requested / 1000 > limit) throw new Error(`所选峰值超过 IQ_LIM=${limit} A，请先将普通电流限制设为至少 ${requested / 1000} A`);
       originalTelem = Number(initial.telem);
       if (![0, 1].includes(originalTelem)) throw new Error("无法读取原遥测状态");
       await cmd("TELEM 0\n"); await cmd("AE 0\n"); await cmd("RUN\n"); await cmd("IQ 0\n");

@@ -17,7 +17,7 @@ export function installFakeAudio(baud=230400,lowTx=false) {
   function ascii(line){
     dev.commands.push(line);const t=line.trim().split(/\s+/),c=t[0];
     if(c==="AUDIO"){sid++;ack=played=used=0;state=0;ended=partial=false;binary=true;lastInput=Date.now();text(`@OK AUDIO OPEN v=1 sid=${sid} rate=8000 bits=16 cap=${capacity} guard=128 prefill=800 window=${windowSize}`);status();return;}
-    if(c==="INFO"){text(`@INFO fw=DR4310 ver=3.4.3 id=2 cfg_id=2 mode=${dev.mode} run=${dev.mode?"CURRENT":"IDLE"} drv=${dev.mode?1:0} ae=${dev.ae} telem=${ram.TELEM} fault=0x0000 latched=0x0000 vbus=24 calib=1 zero=0.134657 dir=1 cfg=flash seq=18 timeout=0 trips=0 drops=0 up=1000 pp=14 baud=1000000 audio=1 uart_baud=${baud} audio_qmax_ma=1000 audio_dmax_ma=200`);return;}
+    if(c==="INFO"){text(`@INFO fw=DR4310 ver=3.4.5 id=2 cfg_id=2 mode=${dev.mode} run=${dev.mode?"CURRENT":"IDLE"} drv=${dev.mode?1:0} ae=${dev.ae} telem=${ram.TELEM} fault=0x0000 latched=0x0000 vbus=24 calib=1 zero=0.134657 dir=1 cfg=flash seq=18 timeout=0 trips=0 drops=0 up=1000 pp=14 baud=1000000 audio=1 uart_baud=${baud} audio_qmax_ma=2000 audio_dmax_ma=1500`);return;}
     if(c==="PING"){text("@PONG up=1000");return;}
     if(c==="HELP"){text("@OK HELP STOP RUN IQ AE TELEM INFO GET SET TLIST TCH TRATE FAULT AUDIO");return;}
     if(c==="GET"){for(const [k,v]of Object.entries(ram))text(`@P ${k}=${v} min=0 max=60000`);text("@OK GET 8");return;}

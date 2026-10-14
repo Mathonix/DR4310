@@ -19,7 +19,7 @@ assert.ok(Number.isInteger(amp)&&amp>=1&&amp<=5);assert.ok(["Q","D"].includes(ax
 const raw=readFileSync(file),samples=raw.length/2;assert.ok(samples>0&&Number.isInteger(samples)&&samples<=8000*300);
 const out=option("--out","../logs/upper_audio_20261014/music-live");mkdirSync(out,{recursive:true});
 const browser=await launchBrowser(),page=await browser.newPage(),errors=[],wire=[],statuses=[];
-let bridge=null,bridgeError="",flushing=false,chunks=[],stdout="",rx=[];
+let bridge=null,bridgeError="",transportClosed=false,flushing=false,chunks=[],stdout="",rx=[];
 let result={file,url,port,baud,axis,amplitude_ma:amp,samples,seconds:samples/8000,passed:false};
 page.on("pageerror",e=>errors.push(e.message));page.on("dialog",d=>d.accept());await page.setViewport({width:1440,height:1000});
 function crc(bytes){let c=65535;for(const b of bytes){c^=b<<8;for(let i=0;i<8;i++)c=((c<<1)^((c&32768)?0x1021:0))&65535;}return c;}
@@ -31,6 +31,7 @@ function parse(bytes){for(const b of bytes){rx.push(b);while(rx.length>=2){if(rx
 async function flush(){if(flushing||!chunks.length)return;flushing=true;try{while(chunks.length){const data=chunks;chunks=[];await page.evaluate(a=>window.__hwReceive?.(a),data);}}catch{}finally{flushing=false;}}
 await page.exposeFunction("__hwWrite",async bytes=>{
   if(bridgeError)throw new Error(bridgeError);
+  if(transportClosed||!bridge||bridge.stdin.destroyed||bridge.stdin.writableEnded)throw new Error("Test transport is closed");
   await new Promise((resolve,reject)=>bridge.stdin.write(JSON.stringify({data:Buffer.from(bytes).toString("base64")})+"\n",e=>e?reject(e):resolve()));
 });
 await page.evaluateOnNewDocument(baud=>{
@@ -46,6 +47,7 @@ await page.evaluateOnNewDocument(baud=>{
   },close:async()=>{controller=null;port.readable=port.writable=null;},getInfo:()=>({usbVendorId:0x1366})};
   window.__hwReceive=bytes=>{if(controller)controller.enqueue(new Uint8Array(bytes));};
   const serial=new EventTarget();serial.requestPort=async()=>port;serial.getPorts=async()=>[];Object.defineProperty(navigator,"serial",{value:serial,configurable:true});
+  window.__hwPort=port;
 },baud);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function snapshot(){return page.evaluate(()=>({status:document.getElementById("audioStatus")?.textContent,stats:document.getElementById("audioStats")?.textContent,file:document.getElementById("audioFileInfo")?.textContent,stopDisabled:document.getElementById("audioStop")?.disabled,message:document.getElementById("msg")?.textContent}));}
@@ -53,6 +55,7 @@ try{
   await page.goto(url,{waitUntil:"networkidle0"});
   bridge=spawn("../.venv/Scripts/python.exe",["../tools/browser_serial_bridge.py","--run","--port",port,"--baud",String(baud)],{stdio:["pipe","pipe","pipe"]});
   bridge.stderr.on("data",b=>{bridgeError+=b.toString();});bridge.on("error",e=>{bridgeError=e.message;});
+  bridge.stdin.on("error",e=>{if(!transportClosed)bridgeError=e.message;});
   bridge.stdout.on("data",bytes=>{stdout+=bytes.toString();let n;while((n=stdout.indexOf("\n"))>=0){const line=stdout.slice(0,n);stdout=stdout.slice(n+1);if(line.trim()){const data=Buffer.from(JSON.parse(line).data,"base64");wire.push(data);parse(data);chunks.push(...data);}}setTimeout(()=>void flush(),2);});
   await sleep(200);assert.equal(bridgeError,"");
   await page.select("#serBaud",String(baud));await page.select("#dLink","serial");await page.click("#dConnect");
@@ -79,8 +82,15 @@ try{
 }catch(e){result.error=e.message;result.ui=await snapshot().catch(()=>null);console.error("MUSIC TEST FAILED",e.message);process.exitCode=1;}
 finally{
   await page.evaluate(()=>document.getElementById("estop")?.click()).catch(()=>{});await sleep(1500);
+  // Stop the page's ASCII polling before ending stdin; the page remains an
+  // active writer after audio EXIT. Keep the bridge alive during page close.
+  try {
+    await page.evaluate(()=>{if(window.__hwPort?.readable)document.getElementById("serDisconnect")?.click();});
+    await page.waitForFunction(()=>!window.__hwPort?.readable,{timeout:5000});
+  }catch(e){result.error??=`Disconnect cleanup failed: ${e.message}`;result.passed=false;process.exitCode=1;}
+  await browser.close();transportClosed=true;
   if(bridge){bridge.stdin.end();await Promise.race([new Promise(r=>bridge.once("exit",r)),sleep(2500)]);}
   result.errors=errors;result.bad_status_crc_frames=badFrames;result.statuses=statuses;result.transport=`Production browser UI and actual ${port}/${baud} via test-only stdio adapter`;
   writeFileSync(out+"/result.json",JSON.stringify(result,null,2));writeFileSync(out+"/uart.rx.bin",Buffer.concat(wire));
-  await browser.close();server?.close();
+  server?.close();
 }

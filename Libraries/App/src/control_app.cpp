@@ -1447,7 +1447,7 @@ void ApplicationController::ApplyIdentResultIfReady() {
 namespace {
 
 constexpr const char *kFirmwareName = "DR4310";
-constexpr const char *kFirmwareVersion = "3.4.4";
+constexpr const char *kFirmwareVersion = "3.4.5";
 
 /* Index order is the default VOFA map. Slots 0..15 stay the historical frame.
  * 28 OlBudget is optional; the default 16-channel map does not include it.
@@ -1920,7 +1920,7 @@ void ApplicationController::ExecuteAudioCommand(char **tok,size_t n) {
   if(!calibration_flash_valid || !arm_all_ok_ || !f.enabled || !encoder_valid_ || !CurrentSampleFresh()) {
     ReplyErr("AUDIO","not_ready");return;
   }
-  if(DeviceConfig_Live()->telemetry || float(amp)*.001f>control_iq_limit_a ||
+  if(DeviceConfig_Live()->telemetry || float(amp)/1000.0f>control_iq_limit_a ||
      !std::isfinite(f.id_a) || !std::isfinite(f.iq_a) ||
      std::fabs(f.id_a)>IQ_HARD_MAX_A || std::fabs(f.iq_a)>IQ_HARD_MAX_A) {
     ReplyErr("AUDIO","safety");return;

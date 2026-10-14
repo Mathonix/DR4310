@@ -79,10 +79,10 @@ TickResult AudioCurrent::tick(PcmRing &pcm, bool paused, bool ended) {
 }
 void LimitAudioVector(float &id,float &iq,float sample_a,bool q_axis,
                       float amplitude_a,float limit) {
-  amplitude_a=std::clamp(amplitude_a,0.0f,float(q_axis?kQMaxAmplitudeMa:kDMaxAmplitudeMa)*.001f);
+  amplitude_a=std::clamp(amplitude_a,0.0f,float(q_axis?kQMaxAmplitudeMa:kDMaxAmplitudeMa)/1000.0f);
   sample_a=std::clamp(sample_a,-amplitude_a,amplitude_a);
   if (q_axis) iq+=sample_a; else id+=sample_a;
-  const float d_limit=std::min(amplitude_a,float(kDMaxAmplitudeMa)*.001f);
+  const float d_limit=std::min(amplitude_a,float(kDMaxAmplitudeMa)/1000.0f);
   id=std::clamp(id,-d_limit,d_limit);
   limit=std::max(0.0f,limit);
   const float mag2=id*id+iq*iq;

@@ -162,9 +162,9 @@ void ascii(ApplicationController &a,const char *s){bytes(reinterpret_cast<const 
 void setup(ApplicationController &a){audio::Global().init(sink,nullptr);cursor.reset(0,now_ms);write_total=0;g_uart_rx_errors=0;g_audio_exit_draining=false;control_mode_cmd=1;control_auto_enable=0;control_current_test_iq_ref_a=0;config.telemetry=false;a=ApplicationController{};tx.clear();}
 int main(){
   ApplicationController a;setup(a);
-  for(const char *s:{"AUDIO OPEN Q 1001\n","AUDIO OPEN Q 1000000000000000000\n"}){ascii(a,s);assert(a.reply=="@ERR AUDIO bad_arg"&&!audio::Global().binary());}
+  for(const char *s:{"AUDIO OPEN Q 2001\n","AUDIO OPEN Q 1000000000000000000\n"}){ascii(a,s);assert(a.reply=="@ERR AUDIO bad_arg"&&!audio::Global().binary());}
   control_iq_limit_a=.5f;ascii(a,"AUDIO OPEN Q 1000\n");assert(a.reply=="@ERR AUDIO safety"&&!audio::Global().binary());control_iq_limit_a=1.9f;
-  for(const char *s:{"AUDIO OPEN Q 0\n","AUDIO OPEN D 201\n","AUDIO OPEN Q 20.0\n","AUDIO OPEN Q -1\n","AUDIO OPEN X 20\n","AUDIO OPEN Q 20 EXTRA\n"}){ascii(a,s);assert(a.reply=="@ERR AUDIO bad_arg"&&!audio::Global().binary());}
+  for(const char *s:{"AUDIO OPEN Q 0\n","AUDIO OPEN D 1501\n","AUDIO OPEN Q 20.0\n","AUDIO OPEN Q -1\n","AUDIO OPEN X 20\n","AUDIO OPEN Q 20 EXTRA\n"}){ascii(a,s);assert(a.reply=="@ERR AUDIO bad_arg"&&!audio::Global().binary());}
   control_mode_cmd=2;ascii(a,"AUDIO OPEN Q 20\n");assert(a.reply=="@ERR AUDIO bad_state");control_mode_cmd=1;
   a.fault_manager_.fault=true;ascii(a,"AUDIO OPEN Q 20\n");assert(a.reply=="@ERR AUDIO fault");a.fault_manager_.fault=false;
   a.arm_all_ok_=false;ascii(a,"AUDIO OPEN Q 20\n");assert(a.reply=="@ERR AUDIO not_ready");a.arm_all_ok_=true;
@@ -194,7 +194,9 @@ int main(){
   a.SetMode(1);a.SetCurrentRef(.1f);assert(!audio::Global().gate()&&!a.drv&&control_mode_cmd==1&&control_current_test_iq_ref_a==.1f);
   control_auto_enable=1;a.Disable();assert(control_auto_enable==0&&!a.drv);
   setup(a);ascii(a,"AUDIO OPEN Q 20\n");std::array<uint8_t,2049>overflow{};bytes(overflow.data(),overflow.size());a.ProcessVofaCommands();a.ProcessVofaCommands();assert(!audio::Global().gate()&&!a.drv&&audio::Global().status().state==audio::State::Halted);
-  setup(a);ascii(a,"AUDIO OPEN Q 1000\n");assert(audio::Global().binary()&&audio::Global().amplitudeA()==1.0f);
+  setup(a);control_iq_limit_a=1.9f;ascii(a,"AUDIO OPEN Q 2000\n");assert(a.reply=="@ERR AUDIO safety"&&!audio::Global().binary());
+  setup(a);control_iq_limit_a=2.0f;ascii(a,"AUDIO OPEN Q 2000\n");assert(audio::Global().binary()&&audio::Global().amplitudeA()==2.0f);
+  setup(a);control_iq_limit_a=1.5f;ascii(a,"AUDIO OPEN D 1500\n");assert(audio::Global().binary()&&audio::Global().amplitudeA()==1.5f);
   std::puts("production UART OPEN / DMA split / binary ownership / EXIT / external control passed");
 }
 '''

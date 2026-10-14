@@ -156,6 +156,7 @@
 !/docs/AUDIO_UART_V1_IMPLEMENTATION.md
 !/docs/AUDIO_REPAIR_20261014.md
 !/docs/AUDIO_1A_EXTENSION.md
+!/docs/AUDIO_2A_EXTENSION.md
 !/docs/UART_BIDIR_DIAGNOSTIC_20261014.md
 !/upper/test/audio-protocol.test.ts
 !/upper/test/audio-session.test.ts

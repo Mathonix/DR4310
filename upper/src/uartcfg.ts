@@ -90,6 +90,7 @@ export function createUartCfg(h: UartCfgHost) {
     connected: () => h.serial.connected, baud: () => h.serial.baudRate,
     firmwareBaud: () => info?.uartBaud,
     amplitudeCapability: axis => axis === "Q" ? info?.audioQMaxMa : info?.audioDMaxMa,
+    currentLimitA: () => devParams.get("IQ_LIM")?.value,
     pendingEdits: () => modifiedKeys().length > 0,
     prepare: () => cogPrepare(), command: audioCommand,
     write: bytes => h.serial.writeBytes(bytes), cancelWrites: () => h.serial.cancelPending(),

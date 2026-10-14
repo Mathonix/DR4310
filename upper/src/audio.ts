@@ -5,8 +5,9 @@ export const AUDIO_STATES = ["预缓冲", "播放中", "已暂停", "播放尾�
 export const AUDIO_REASONS = ["正常", "CRC 错误", "序号缺口", "缓冲已满", "接收/协议错误", "通信超时", "音频欠载", "已取消", "安全互锁", "控制模式改变", "播放结束", "会话不匹配"];
 export const audioReason = (s: AudioStatus): string => s.reason === 0 && s.underruns ? "音频欠载" : s.reason === 0 && (s.state === 5 || s.state === 6) ? "中止原因未收到" : AUDIO_REASONS[s.reason] ?? "未知原因";
 /** Absent capability means the frozen V1 200 mA limit. */
+export const AUDIO_MAX_AMPLITUDE_MA = { Q: 2000, D: 1500 } as const;
 export function audioAmplitudeMax(axis: "Q" | "D", advertised?: number): number {
-  const ceiling = axis === "Q" ? 1000 : 200;
+  const ceiling = AUDIO_MAX_AMPLITUDE_MA[axis];
   return Number.isInteger(advertised) && advertised! >= 1 && advertised! <= ceiling ? advertised! : 200;
 }
 
@@ -121,7 +122,7 @@ export class AudioSession {
     this.lastSendAt = this.io.now();
   }
   async open(axis: "Q" | "D", amplitude: number): Promise<void> {
-    const max = axis === "Q" ? 1000 : 200;
+    const max = AUDIO_MAX_AMPLITUDE_MA[axis];
     if (!Number.isInteger(amplitude) || amplitude < 1 || amplitude > max) throw new Error(`${axis} 轴幅度须为 1–${max} mA 的整数`);
     if (this.cancelled) throw new Error("操作已取消");
     this.binary = true;

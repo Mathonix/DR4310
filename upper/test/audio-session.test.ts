@@ -8,9 +8,10 @@ const frames = fixtures.vectors.filter(v => v.valid && v.type === 0x81).map(v =>
 describe("audio host", () => {
   it("requires advertised Q capability for the panel and preserves the D ceiling",()=>{
     expect(audioAmplitudeMax("Q")).toBe(200);expect(audioAmplitudeMax("Q",NaN)).toBe(200);
-    expect(audioAmplitudeMax("Q",1000)).toBe(1000);expect(audioAmplitudeMax("D",1000)).toBe(200);
-    expect(audioAmplitudeMax("D",200)).toBe(200);expect(audioAmplitudeMax("Q",1001)).toBe(200);
-    const info=parseInfo({audio_qmax_ma:"1000",audio_dmax_ma:"200"});expect(info.audioQMaxMa).toBe(1000);expect(info.audioDMaxMa).toBe(200);
+    expect(audioAmplitudeMax("Q",2000)).toBe(2000);expect(audioAmplitudeMax("D",1500)).toBe(1500);
+    expect(audioAmplitudeMax("Q",1000)).toBe(1000);expect(audioAmplitudeMax("D",200)).toBe(200);
+    expect(audioAmplitudeMax("Q",2001)).toBe(200);expect(audioAmplitudeMax("D",1501)).toBe(200);
+    const info=parseInfo({audio_qmax_ma:"2000",audio_dmax_ma:"1500"});expect(info.audioQMaxMa).toBe(2000);expect(info.audioDMaxMa).toBe(1500);
   });
   it("accepts INFO beyond 400 bytes with appended firmware diagnostics",()=>{
     const line="@INFO fw=DR4310 ver=3.4.1 id=2 "+"extra=0 ".repeat(65)+"audio=1 uart_baud=230400\n";
@@ -77,9 +78,10 @@ describe("audio host", () => {
     expect(f.engine.status?.played).toBe(8000);expect(f.engine.retries).toBeGreaterThan(0);expect(f.seqs.filter(n=>n===2).length).toBe(2);
     expect(await f.engine.exit()).toBe(true);
   });
-  it("opens Q at 1000 mA and rejects Q above 1000 or D above 200 before writing",async()=>{
-    const f=fake();await expect(f.engine.open("D",201)).rejects.toThrow();await expect(f.engine.open("Q",1001)).rejects.toThrow();
-    expect(f.texts).toEqual([]);await f.engine.open("Q",1000);expect(f.texts).toEqual(["AUDIO OPEN Q 1000\n"]);await f.engine.exit();
+  it("opens Q at 2000 / D at 1500 mA and rejects above each ceiling before writing",async()=>{
+    const f=fake();await expect(f.engine.open("D",1501)).rejects.toThrow();await expect(f.engine.open("Q",2001)).rejects.toThrow();
+    expect(f.texts).toEqual([]);await f.engine.open("Q",2000);expect(f.texts).toEqual(["AUDIO OPEN Q 2000\n"]);await f.engine.exit();
+    const d=fake();await d.engine.open("D",1500);expect(d.texts).toEqual(["AUDIO OPEN D 1500\n"]);await d.engine.exit();
   });
   it("negotiates low TX and fills the advertised 4096 ring with sparse STATUS",async()=>{
     const f=fake(false,true);await f.engine.open("D",5);expect(f.engine.lowTx).toBe(true);expect(f.engine.capacity).toBe(4096);expect(f.engine.window).toBe(12);

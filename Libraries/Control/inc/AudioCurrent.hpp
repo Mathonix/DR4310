@@ -9,8 +9,8 @@ namespace audio {
 #define AUDIO_LOW_TX_MODE 1
 #endif
 constexpr uint32_t kPcmCapacity = AUDIO_LOW_TX_MODE ? 4096 : 2048;
-constexpr uint16_t kQMaxAmplitudeMa = 1000;
-constexpr uint16_t kDMaxAmplitudeMa = 200;
+constexpr uint16_t kQMaxAmplitudeMa = 2000;
+constexpr uint16_t kDMaxAmplitudeMa = 1500;
 static_assert(std::atomic<uint32_t>::is_always_lock_free, "PCM indexes must be lock-free");
 /* Producer: main, consumer: FOC ISR. Reset only with the audio gate closed.
  * Publishing head releases initialized PCM; publishing tail releases storage. */

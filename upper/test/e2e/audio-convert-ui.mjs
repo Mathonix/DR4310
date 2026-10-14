@@ -76,11 +76,11 @@ try {
   assert.equal(await page.evaluate(() => window.__audioDev.commands.length), 0, "offline conversion must not command the motor");
   await page.select("#dLink", "serial"); await page.click("#dConnect");
   await page.waitForFunction(() => !document.getElementById("audioInputs").disabled); await page.click("#audioReady");
-  await page.$eval("#audioAmpRange", e => { e.value = "750"; e.dispatchEvent(new Event("input", { bubbles: true })); });
-  assert.equal(await page.$eval("#audioAmp", e => e.value), "750");
+  await page.$eval("#audioAmpRange", e => { e.value = "1750"; e.dispatchEvent(new Event("input", { bubbles: true })); });
+  assert.equal(await page.$eval("#audioAmp", e => e.value), "1750");
   await page.select("#audioAxis", "D");
-  assert.equal(await page.$eval("#audioAmp", e => e.value), "200"); assert.equal(await page.$eval("#audioAmpRange", e => e.max), "200");
-  await page.$eval("#audioAmp", e => { e.value = "201"; e.dispatchEvent(new Event("input", { bubbles: true })); });
+  assert.equal(await page.$eval("#audioAmp", e => e.value), "1500"); assert.equal(await page.$eval("#audioAmpRange", e => e.max), "1500");
+  await page.$eval("#audioAmp", e => { e.value = "1501"; e.dispatchEvent(new Event("input", { bubbles: true })); });
   assert.equal(await page.$eval("#audioPlay", e => e.disabled), true);
   await page.$eval("#audioAmp", e => { e.value = "1"; e.dispatchEvent(new Event("input", { bubbles: true })); });
   assert.equal(await page.$eval("#audioAmpRange", e => e.value), "1");

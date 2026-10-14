@@ -40,9 +40,15 @@ Pop-Location
 
 ## 当前状态（2026-10-14）
 
-### 固件 3.4.4 — 音频 UART V1 + 低 TX 模式
+### 固件 3.4.5 — 音频 UART V1 + 低 TX 模式
 
 音乐模式分支 `feature/music-mode`，从已实测的 `feature/audio-uart-v1` 工作树整理，基线 `a104bb6`。固件提交 `b0809b3` 保留 3.3.0 齿槽补偿并加入 3.4.4 音频/短 TX；上位机提交 `60b7d01` 包含电流音频、本地音乐转换及完整测试。发布目标为 `origin/feature/music-mode`，该分支独立于 main。
+
+**最新电流扩展已完成：** 用户要求 Q 轴音频峰值最高 **2 A**、D 轴最高 **1.5 A**。3.4.5 已烧录，INFO 公布 `audio_qmax_ma=2000 audio_dmax_ma=1500`；网页同步支持数字输入/滑块和能力协商。mA 转 A 使用除以 1000，修复 D=1500 mA 在 IQ_LIM=1.5 A 的浮点边界误拒绝。普通 IQ_LIM 保持 **1.9 A**，使用 Q=2 A 需用户将它设为至少 2 A；网页显示限制并在播放前重新 GET IQ_LIM，固件仍独立检查。详见 [电流扩展记录](docs/AUDIO_2A_EXTENSION.md)。
+
+实机仅测试 Q/D 各 1 秒、300 Hz、峰值上限 1 mA，均 FINISHED、played=8000、ACK=50、欠载/故障为 0；Q 原生工具丢弃 3 个坏 CRC STATUS，D 生产网页独立检测 1 个（网页坏帧计数 2）。D 浏览器测试退出竞争已修复并实机复测通过。测试后 STOP、原参数恢复并 SAVE，IDLE/drv=0/ae=0、uart_errors=0，校准和齿槽 CRC=0x0BECE80E 保留。未做 2 A / 1.5 A 功率级验收。私有证据和备份在 `logs/audio_2a_20261014/`。
+
+最新 Cloudflare 部署 `9213c239-4007-423d-b36a-528ed5d09ff2`，app.js SHA256 `95474fe276b0fede7074c67444b95b1b7e3e373be83e0692b001b056a856600d` 与本地构建一致。319 项上位机测试、typecheck、6 项生产路径/共享向量测试、两种 TX 的五分钟模拟和固件构建，以及本地/线上浏览器播放与转换测试通过。短 TX ELF SHA256 `77fe8b9e19dc138ae419814646604c1e03fdf4a106da494e6e3bd566d656207d`；Flash/RAM 98412/27896 B，标准 TX 94228/23800 B。
 
 **已实现（冻结协议 AUDIO UART V1）：**
 - `motor_audio.cpp/h`：帧解析、会话、seq/credit、CRC16-CCITT、STATUS、300ms watchdog、2s 恢复 ASCII
@@ -79,7 +85,7 @@ J-Link VCOM 在本板双向音频流下仍会损坏部分 MCU→PC STATUS；降�
 - 第 3 条：音乐分支、两层 gitignore 和提交已整理；仓库保留源码、协议向量、全部回归测试及交接文档，共 241 个文件，日志、RAW 音乐、Flash 备份、生成 bundle、构建产物、依赖和凭据文件保持本地。
 - 干净 Git 索引检出验证：Python 24 项、上位机 319 项、typecheck 和 Pages 构建通过。短 TX Flash/RAM 98412/27896 B；标准 TX 94228/23800 B。新检出生成的 app.js 与已部署版本字节一致。
 - 本条修复：typecheck 自动生成所需 bundle；旧诊断工具从匹配 ELF 解析 SRAM 地址、先核对 Flash、失败恢复 BRR 并关闭探针；标定/位置测试工具可指定串口与 200000/230400 波特率，浏览器标定测试不再依赖旧表的固定 CRC。
-- 冻结协议文档保持不变，短 TX 扩展在 `docs/AUDIO_UART_V1_IMPLEMENTATION.md` 说明。剩余硬件限制：J-Link 回传仍有坏 CRC STATUS、Q 轴 1 A 未做实机验收。
+- 冻结协议文档保持不变，短 TX 扩展在 `docs/AUDIO_UART_V1_IMPLEMENTATION.md` 说明。剩余硬件限制：J-Link 回传仍有坏 CRC STATUS，高幅功率级播放未做实机验收。
 
 ## 关键文件
 
@@ -127,7 +133,7 @@ J-Link VCOM 在本板双向音频流下仍会损坏部分 MCU→PC STATUS；降�
 
 - **`protocol_vectors.json` 路径**：固件和上位机共用 113 组 golden vectors，路径已确认 `protocol/protocol_vectors.json`
 - **低 TX 模式测试覆盖**：模式 0/1 均有原生回归与五分钟 2400000 样本模拟，低 TX 约 3001 次 STATUS；两种模式 UART/安全保护均通过。第一条结束时上位机 314 项、Python 21 项通过。
-- **1A 功率级播放**：Q 轴 1A 扩展已实现并验证边界，但未做 1A 实机播放。需人工确认安全条件后用 `--amplitude-ma 1000` 测试
+- **高幅功率级播放**：Q 轴 2 A / D 轴 1.5 A 已实现并验证软件边界，实机仅验收小电流。`audio_host_test.py` 上限 20 mA，浏览器实机回归上限 5 mA；不要把这些工具作为高幅验收工具。
 - **ISR 最大耗时**：`current_isr_max_cycles` 是遥测字段（JustFloat 通道），不在 INFO 里。音频播放时应有非零值，需通过遥测采集并作为交付数据
 
 ### RAM 预算
@@ -139,8 +145,8 @@ J-Link VCOM 在本板双向音频流下仍会损坏部分 MCU→PC STATUS；降�
 ### 上位机
 
 - **音频面板 RAW 播放**：3.4.4 短 TX 已通过实际文件完整播放，上文记录有效。
-- **续作第 2 条**：增加本地 MP3/WAV/FLAC 等浏览器支持音乐转 8k 单声道 S16LE、下载 RAW、直接播放；离线转换可用。最高电流数字输入和滑块同步，按 INFO 约束 Q≤1000 mA、D≤200 mA，轴切换自动限幅。类型检查和 319 项上位机测试通过，真实浏览器三种格式转换/下载/模拟播放、短 TX 流程及手机无横向溢出通过。本条没有运行实机电机或修改固件。
-- **第 2 条部署已完成**：dr4310.233688.xyz 版本 `b0838148-2c0a-4147-93c8-e2b9bfa554f3`，app.js SHA256 `bf9623b3945cedca3556f88bf6b6e06af4abc49aa407b78ee6e1bca51d01781e` 与本地构建一致。线上转换与短 TX 浏览器验证通过，记录在本机 `logs/continue_task2_20261014/`。三条续作均已处理，后续先读本文件，按新的用户指示继续。
+- **续作第 2 条**：增加本地 MP3/WAV/FLAC 等浏览器支持音乐转 8k 单声道 S16LE、下载 RAW、直接播放；离线转换可用。最高电流数字输入和滑块同步，轴切换自动限幅。当前 3.4.5 按 INFO 约束 Q≤2000 mA、D≤1500 mA，并检查普通 IQ_LIM。类型检查和 319 项上位机测试通过，真实浏览器三种格式转换/下载/模拟播放、短 TX 流程及手机无横向溢出通过。
+- **部署已完成**：dr4310.233688.xyz 已更新为上文 3.4.5 配套版本。第 2 条历史部署为 `b0838148-2c0a-4147-93c8-e2b9bfa554f3`，转换记录在本机 `logs/continue_task2_20261014/`。三条续作均已处理，后续先读本文件，按新的用户指示继续。
 - **GitHub Pages 同步**：Pages 工作流跟随 main；音乐分支尚未合并 main，Cloudflare 已部署上述音乐版本。
 - **浏览器串口选择**：Web Serial 在某些浏览器/系统上串口选择框无法完成设备选择（交接书提到自动化浏览器测试遇到此问题）。正式网页仍直接用 Web Serial，测试用本地串口桥
 
