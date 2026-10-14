@@ -18,6 +18,8 @@ constexpr float kFocPwmFreqHz = 20000.0f;
 struct FOCState {
   float id_ref_a = 0.0f;
   float iq_ref_a = 0.0f;
+  float cogging_iq_a = 0.0f;
+  float audio_cmd_a = 0.0f;  // separate from legacy IdRef/IqRef semantics
   float id_a = 0.0f;
   float iq_a = 0.0f;
   float vd_v = 0.0f;
@@ -63,6 +65,7 @@ class FocController {
   void SetDecouplingEnable(uint8_t enable);
   void SetMaxModulation(float max_mod);
   void SetRefs(float id_ref_a, float iq_ref_a);
+  void SetCoggingFeedforward(float iq_a);
   void SetElectricalAngle(float electrical_angle_rad);
   void SetDirectElectricalAngle(float electrical_angle_rad);
   void SetOmegaE(float omega_e_rad_s);
@@ -101,6 +104,7 @@ class FocController {
   CurrentLoopController current_loop_;
   hardware::CurrentSample last_current_ = {};
   float iq_limit_ = 2.50f;
+  float iq_command_a_ = 0.0f;
   volatile float min_bus_v_ = 6.0f;
   float pi_out_limit_v_ = 0.0f;
   float pi_kaw_ = motor_params::kDefaultCurrentKaw;

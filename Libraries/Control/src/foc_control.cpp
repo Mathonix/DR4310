@@ -1,7 +1,9 @@
 #include "FOCController.hpp"
 
 #include "SVPWM.hpp"
+#include "CoggingCompensator.hpp"
 #include "iq_limits.h"
+#include "motor_audio.h"
 
 #include <algorithm>
 #include <cmath>
@@ -144,6 +146,7 @@ void FocController::ApplyModulationSc(float sin_t,
 }
 
 void FocController::TripOvercurrent() {
+  audio::Global().abortSafety(audio::Reason::SafetyFault);
   state_.enabled = 0U;
   state_.open_loop_voltage_enable = 0U;
   state_.duty_a = 0.0f;
@@ -261,7 +264,13 @@ void FocController::SetMaxModulation(float max_mod) {
 
 void FocController::SetRefs(float id_ref_a, float iq_ref_a) {
   state_.id_ref_a = id_ref_a;
+  iq_command_a_ = iq_ref_a;
   state_.iq_ref_a = Clamp(iq_ref_a, -iq_limit_, iq_limit_);
+}
+
+void FocController::SetCoggingFeedforward(float iq_a) {
+  state_.cogging_iq_a = std::isfinite(iq_a) ?
+      Clamp(iq_a, -COGGING_LIMIT_MAX_A, COGGING_LIMIT_MAX_A) : 0.0f;
 }
 
 void FocController::SetElectricalAngle(float electrical_angle_rad) {
@@ -294,6 +303,8 @@ void FocController::SetOpenLoopVoltage(uint8_t enable,
 }
 
 void FocController::OnPwmUpdate() {
+  state_.audio_cmd_a=0;
+  if(audio::Global().stopRequested())Enable(0);
   if (isr_busy_ != 0U) {
     state_.isr_overrun_count++;
     return;
@@ -336,6 +347,7 @@ void FocController::OnPwmUpdate() {
   }
 
   if (bus_v < min_bus_v_) {
+    audio::Global().abortSafety(audio::Reason::SafetyFault);
     Enable(0U);
     WritePwm(0.0f, 0.0f, 0.0f);
     isr_busy_ = 0U;
@@ -377,6 +389,13 @@ void FocController::OnPwmUpdate() {
     state_.iq_a = iq_calc;
   }
 
+  if (audio::Global().gate() &&
+      (state_.open_loop_voltage_enable || state_.angle_override_enable ||
+       !std::isfinite(state_.id_a) || !std::isfinite(state_.iq_a) ||
+       std::fabs(state_.id_a)>kOvercurrentTripA || std::fabs(state_.iq_a)>kOvercurrentTripA)) {
+    audio::Global().abortSafety(audio::Reason::SafetyFault);
+    Enable(0);isr_busy_=0;return;
+  }
   if (state_.open_loop_voltage_enable != 0U) {
     if constexpr (kSwapDq) {
       ApplyModulationSc(sin_t,
@@ -395,11 +414,21 @@ void FocController::OnPwmUpdate() {
     return;
   }
 
-  state_.iq_ref_a = Clamp(state_.iq_ref_a, -iq_limit_, iq_limit_);
+  // Recompute from the base command every tick; never accumulate feedforward.
+  state_.iq_ref_a = CoggingCompensator::Combine(iq_command_a_,
+                                               state_.cogging_iq_a, iq_limit_);
 
+  float id_cmd=state_.id_ref_a,iq_cmd=state_.iq_ref_a;
+  if(audio::Global().gate()) {
+    state_.audio_cmd_a=audio::Global().tick20kHz();
+    if(audio::Global().stopRequested()) {Enable(0);isr_busy_=0;return;}
+    audio::LimitAudioVector(id_cmd,iq_cmd,state_.audio_cmd_a,
+                          audio::Global().axis()==audio::Axis::Q,
+                          audio::Global().amplitudeA(),iq_limit_);
+  }
   const CurrentLoopVoltage voltage =
-      current_loop_.update(state_.id_ref_a,
-                           state_.iq_ref_a,
+      current_loop_.update(id_cmd,
+                           iq_cmd,
                            state_.id_a,
                            state_.iq_a,
                            kFocDtS);

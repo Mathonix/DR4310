@@ -1,4 +1,5 @@
 # Public repository: firmware, protocols, tests and selected development tools.
+# Music/audio and cogging implementation, shared vectors and reproducible tests.
 # New files stay local until explicitly added to this allowlist.
 # Keep third-party license files alongside the retained components.
 *
@@ -43,7 +44,9 @@
 !/.gitignore
 !/CMakeLists.txt
 !/CMakePresets.json
+!/4310_G431KBT6.ioc
 !/README.md
+!/CLAUDE.md
 !/requirements-tools.txt
 !/POSITION_VFF_20261011.md
 !/FLASH_TEST_20261011.md
@@ -76,6 +79,8 @@
 !/Libraries/App/src/control_app.cpp
 !/Libraries/App/src/gm6020_can.c
 !/Libraries/Control/inc/ControlTiming.hpp
+!/Libraries/Control/inc/CoggingCompensator.hpp
+!/Libraries/Control/inc/cogging_types.h
 !/Libraries/Control/inc/CordicMath.hpp
 !/Libraries/Control/inc/CurrentLoopController.hpp
 !/Libraries/Control/inc/ElectricalAngle.hpp
@@ -92,6 +97,7 @@
 !/Libraries/Control/inc/TrajectoryGenerator.hpp
 !/Libraries/Control/src/cordic_math.cpp
 !/Libraries/Control/src/current_loop.cpp
+!/Libraries/Control/src/cogging_compensator.cpp
 !/Libraries/Control/src/electrical_angle.cpp
 !/Libraries/Control/src/foc_control.cpp
 !/Libraries/Control/src/overload_limiter.cpp
@@ -119,16 +125,57 @@
 !/tests/test_overload_limiter.cpp
 !/tests/test_uart_config.c
 !/tests/test_position_control.py
+!/tests/__init__.py
+!/tests/test_can_motor_gui.py
+!/tests/test_can_speed_pos_frames.py
+!/tests/test_control_timing.cpp
+!/tests/test_electrical_zero.cpp
+!/tests/test_gm6020_can.cpp
+!/tests/test_motor_safety_regressions.py
+!/tests/test_mt6701_crc.py
+!/tests/test_uart_brr_sweep.py
+!/tests/test_rotor_estimator.cpp
+!/tests/test_cogging_compensator.cpp
+!/tests/test_cogging_tool.py
+!/tests/test_cogging_uart.py
+!/tests/test_calibration_store.c
+!/tests/test_motor_audio.cpp
+!/tests/test_audio_vectors.py
+!/tests/test_audio_integration.py
+!/Libraries/App/inc/motor_audio.h
+!/Libraries/App/inc/uart_dma_cursor.h
+!/Libraries/App/src/motor_audio.cpp
+!/Libraries/Control/inc/AudioCurrent.hpp
+!/Libraries/Control/src/audio_current.cpp
+!/protocol/
+!/protocol/protocol_vectors.json
+!/protocol/audio_uart_v1.ts
+!/tools/generate_audio_vectors.py
+!/tools/audio_host_test.py
+!/docs/UART_AUDIO_PROTOCOL_V1.md
+!/docs/AUDIO_UART_V1_IMPLEMENTATION.md
+!/docs/AUDIO_REPAIR_20261014.md
+!/docs/AUDIO_1A_EXTENSION.md
+!/docs/UART_BIDIR_DIAGNOSTIC_20261014.md
+!/upper/test/audio-protocol.test.ts
+!/upper/test/audio-session.test.ts
+!/upper/test/e2e/audio-ui.mjs
+!/upper/test/e2e/fake-audio.mjs
+!/upper/test/e2e/audio-hardware.mjs
 
 # Protocol documentation and reproducible build / calibration tooling.
 !/docs/UART_PROTOCOL.md
+!/docs/COGGING_COMPENSATION.md
+!/docs/COGGING_HARDWARE_TEST_20261013.md
 !/docs/CAN_USAGE.md
 !/docs/GM6020_CAN_PROTOCOL.md
 !/docs/VOFA_CURRENT_LOOP_COMMANDS.md
 !/tools/__init__.py
 !/tools/build_flash_motor.py
 !/tools/calibrate_motor.py
+!/tools/cogging_calibrate.py
 !/tools/position_hardware_test.py
+!/tools/uart_brr_sweep.py
 !/tools/observe_zero_current.py
 !/tools/can_motor_control.py
 !/tools/can_motor_gui.py
@@ -148,6 +195,25 @@
 !/upper/scripts/
 !/upper/scripts/build-client.mjs
 !/upper/scripts/build-pages.mjs
+!/upper/test/
+!/upper/test/cogging.test.ts
+!/upper/test/ui.test.ts
+!/upper/test/uartcfg.test.ts
+!/upper/test/audio-convert.test.ts
+!/upper/test/auto-enable.test.ts
+!/upper/test/dashboard.test.ts
+!/upper/test/features.test.ts
+!/upper/test/firmware.test.ts
+!/upper/test/measurement.test.ts
+!/upper/test/protocol.test.ts
+!/upper/test/safety.test.ts
+!/upper/test/theme.test.ts
+!/upper/test/uartcfg-transaction.test.ts
+!/upper/test/e2e/
+!/upper/test/e2e/cogging-hardware.mjs
+!/upper/test/e2e/browser.mjs
+!/upper/test/e2e/audio-convert-ui.mjs
+!/tools/browser_serial_bridge.py
 
 # Required CMSIS and HAL dependencies with licenses
 !/Drivers/CMSIS/Device/ST/STM32G4xx/Include/stm32g431xx.h

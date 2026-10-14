@@ -21,6 +21,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 /* USER CODE BEGIN Includes */
+DMA_HandleTypeDef hdma_usart1_rx;
 
 /* USER CODE END Includes */
 
@@ -496,6 +497,21 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
     /* USER CODE BEGIN USART1_MspInit 1 */
+    __HAL_RCC_DMA1_CLK_ENABLE();
+    __HAL_RCC_DMAMUX1_CLK_ENABLE();
+    hdma_usart1_rx.Instance = DMA1_Channel5;
+    hdma_usart1_rx.Init.Request = DMA_REQUEST_USART1_RX;
+    hdma_usart1_rx.Init.Direction = DMA_PERIPH_TO_MEMORY;
+    hdma_usart1_rx.Init.PeriphInc = DMA_PINC_DISABLE;
+    hdma_usart1_rx.Init.MemInc = DMA_MINC_ENABLE;
+    hdma_usart1_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    hdma_usart1_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+    hdma_usart1_rx.Init.Mode = DMA_CIRCULAR;
+    hdma_usart1_rx.Init.Priority = DMA_PRIORITY_LOW;
+    if (HAL_DMA_Init(&hdma_usart1_rx) != HAL_OK) { Error_Handler(); }
+    __HAL_LINKDMA(huart, hdmarx, hdma_usart1_rx);
+    HAL_NVIC_SetPriority(DMA1_Channel5_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(DMA1_Channel5_IRQn);
     HAL_NVIC_SetPriority(USART1_IRQn, 6, 0);
     HAL_NVIC_EnableIRQ(USART1_IRQn);
 
@@ -528,6 +544,9 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* huart)
     HAL_GPIO_DeInit(GPIOB, GPIO_PIN_6|GPIO_PIN_7);
 
     /* USER CODE BEGIN USART1_MspDeInit 1 */
+    HAL_DMA_DeInit(huart->hdmarx);
+    HAL_NVIC_DisableIRQ(DMA1_Channel5_IRQn);
+    HAL_NVIC_DisableIRQ(USART1_IRQn);
 
     /* USER CODE END USART1_MspDeInit 1 */
   }

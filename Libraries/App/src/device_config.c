@@ -16,6 +16,9 @@ static DeviceConfigData g_live;
 static uint8_t g_active_can_id = MOTOR_CAN_ID;
 static DeviceConfigSource g_source = DEVCFG_SRC_DEFAULT;
 static uint32_t g_sequence = 0U;
+static uint8_t g_cog_written[COGGING_TABLE_SIZE / 8U];
+static uint16_t g_cog_count;
+static uint8_t g_cog_upload;
 
 typedef enum { P_CFG_U8, P_CFG_U16, P_CFG_U32, P_CFG_F32, P_VAR_F32 } ParamKind;
 
@@ -80,6 +83,9 @@ static const ParamDef kParams[] = {
    * ol_reserved[4]; a stored 0 is not a legal ratio and is repaired on load. */
   {PINFO("MAX_MOD", DEVICE_MAX_MOD_MIN, DEVICE_MAX_MOD_MAX, 0U, 0U, NULL), P_VAR_F32, CFG_OFF(ol_reserved), &control_max_modulation, NULL, 0U},
   {PINFO("POS_VFF", 0.0f, 1.0f, 0U, 0U, NULL), P_VAR_F32, CFG_OFF(pos_vff), &control_position_velocity_ff_gain, NULL, 0U},
+  {PINFO("COG_EN", 0.0f, 1.0f, 1U, 0U, NULL), P_CFG_F32, CFG_OFF(cog_en), NULL, NULL, 0U},
+  {PINFO("COG_GAIN", 0.0f, 1.0f, 0U, 0U, NULL), P_CFG_F32, CFG_OFF(cog_gain), NULL, NULL, 0U},
+  {PINFO("COG_LIM", 0.0f, COGGING_LIMIT_MAX_A, 0U, 0U, NULL), P_CFG_F32, CFG_OFF(cog_limit_a), NULL, NULL, 0U},
 };
 #define PARAM_COUNT (sizeof(kParams) / sizeof(kParams[0]))
 
@@ -191,6 +197,17 @@ int DeviceConfig_Validate(const DeviceConfigData *cfg) {
   if (!(cfg->ol_iq >= cfg->iq_limit)) {
     return 0;
   }
+  const CoggingMap *map = &cfg->cogging;
+  if (map->valid > 1U || (cfg->cog_en != 0.0f && map->valid == 0U)) return 0;
+  if (map->valid) {
+    if (map->encoder_direction > 1U || map->pole_pairs < 1U ||
+        map->pole_pairs > 40U || !isfinite(map->electrical_zero_rad) ||
+        map->electrical_zero_rad < 0.0f || map->electrical_zero_rad >= 6.28318530718f) return 0;
+    for (size_t i = 0U; i < COGGING_TABLE_SIZE; ++i) {
+      if (map->current_ma[i] < -COGGING_SAMPLE_MAX_MA ||
+          map->current_ma[i] > COGGING_SAMPLE_MAX_MA) return 0;
+    }
+  }
   return 1;
 }
 
@@ -226,6 +243,8 @@ void DeviceConfig_Capture(DeviceConfigData *cfg) {
 }
 
 void DeviceConfig_Apply(const DeviceConfigData *cfg) {
+  g_cog_upload = 0U;
+  g_cog_count = 0U;
   g_live = *cfg;
   for (size_t i = 0U; i < PARAM_COUNT; ++i) {
     if (kParams[i].kind == P_VAR_F32) {
@@ -380,6 +399,8 @@ void DeviceConfig_Init(void) {
   g_defaults.ol_en = 0.0f;
   g_defaults.ol_iq = IQ_CONTINUOUS_MAX_A;
   g_defaults.ol_time_s = OL_TIME_DEFAULT_S;
+  g_defaults.cog_gain = 1.0f;
+  g_defaults.cog_limit_a = COGGING_LIMIT_DEFAULT_A;
   g_defaults.telem_hz = DEVICE_DEFAULT_TELEM_HZ;
   telem_identity(g_defaults.telem_ch);
   g_live = g_defaults;
@@ -448,6 +469,8 @@ DeviceConfigStatus DeviceConfig_SetParam(size_t index, float value) {
   if (!value_ok(p, value)) {
     return DEVCFG_ERR_RANGE;
   }
+  if (strcmp(p->info.key, "COG_EN") == 0 && value != 0.0f &&
+      (!g_live.cogging.valid || g_cog_upload)) return DEVCFG_ERR_RANGE;
   if (strcmp(p->info.key, "VBUS_MIN") == 0) {
     if (!vbus_pair_ok(value, control_vbus_max_v)) {
       return DEVCFG_ERR_RANGE;
@@ -489,6 +512,7 @@ DeviceConfigSource DeviceConfig_Reload(void) {
 }
 
 int DeviceConfig_Save(uint32_t *saved_sequence) {
+  if (g_cog_upload) return 0;
   StoreImage image;
   if (!StoreImage_Load(&image)) {
     memset(&image, 0, sizeof(image));
@@ -516,9 +540,58 @@ int DeviceConfig_Save(uint32_t *saved_sequence) {
 }
 
 void DeviceConfig_OnCalibrationSaved(uint8_t encoder_direction, uint32_t sequence) {
+  /* Every commutation recalibration invalidates the old motor-specific map. */
+  DeviceConfig_CoggingClear();
   g_live.enc_dir = (encoder_direction != 0U) ? 1U : 0U;
   g_sequence = sequence;
 }
+
+void DeviceConfig_CoggingClear(void) {
+  g_live.cog_en = 0.0f;
+  g_live.cogging.valid = 0U;
+  g_cog_upload = 0U;
+  g_cog_count = 0U;
+  memset(g_cog_written, 0, sizeof(g_cog_written));
+}
+
+void DeviceConfig_CoggingBegin(void) {
+  DeviceConfig_CoggingClear();
+  memset(&g_live.cogging, 0, sizeof(g_live.cogging));
+  g_cog_upload = 1U;
+}
+
+int DeviceConfig_CoggingSet(uint16_t start, const int16_t *ma, size_t count) {
+  if (!g_cog_upload || !ma || count == 0U || start >= COGGING_TABLE_SIZE ||
+      count > COGGING_TABLE_SIZE - start) return 0;
+  for (size_t i = 0U; i < count; ++i) {
+    if (ma[i] < -COGGING_SAMPLE_MAX_MA || ma[i] > COGGING_SAMPLE_MAX_MA) return 0;
+  }
+  for (size_t i = 0U; i < count; ++i) {
+    const size_t index = start + i;
+    const uint8_t mask = (uint8_t)(1U << (index % 8U));
+    g_live.cogging.current_ma[index] = ma[i];
+    if (!(g_cog_written[index / 8U] & mask)) {
+      g_cog_written[index / 8U] |= mask;
+      ++g_cog_count;
+    }
+  }
+  return 1;
+}
+
+int DeviceConfig_CoggingCommit(float zero, uint8_t direction, uint8_t poles) {
+  if (!g_cog_upload || g_cog_count != COGGING_TABLE_SIZE || direction > 1U ||
+      poles < 1U || poles > 40U || !isfinite(zero) ||
+      zero < 0.0f || zero >= 6.28318530718f) return 0;
+  g_live.cogging.electrical_zero_rad = zero;
+  g_live.cogging.encoder_direction = direction;
+  g_live.cogging.pole_pairs = poles;
+  g_live.cogging.valid = 1U;
+  g_cog_upload = 0U;
+  return 1;
+}
+
+uint16_t DeviceConfig_CoggingWritten(void) { return g_cog_count; }
+int DeviceConfig_CoggingUploading(void) { return g_cog_upload != 0U; }
 
 const uint8_t *DeviceConfig_TelemChannels(void) { return g_live.telem_ch; }
 
@@ -579,8 +652,8 @@ int DeviceConfig_SetTelemHz(uint16_t hz) {
 }
 
 uint16_t DeviceConfig_MaxTelemHz(void) {
-  /* 16 float32 + 4-byte JustFloat tail. Leave 20% of 115200 8N1 for replies. */
-  const uint32_t budget = (115200U / 10U) * 4U / 5U;
+  /* 16 float32 + 4-byte JustFloat tail. Leave 20% of UART 8N1 for replies. */
+  const uint32_t budget = (DEVICE_UART_BAUD / 10U) * 4U / 5U;
   const uint32_t hz = budget / 68U;
   if (hz > 1000U) {
     return 1000U;
@@ -594,7 +667,7 @@ uint16_t DeviceConfig_MaxTelemHz(void) {
 int DeviceConfig_TelemPeriodMs(uint16_t hz, uint32_t *period_ms) {
   uint32_t period;
   uint32_t actual;
-  const uint32_t budget = (115200U / 10U) * 4U / 5U;
+  const uint32_t budget = (DEVICE_UART_BAUD / 10U) * 4U / 5U;
   if ((hz < 10U) || (hz > 1000U) || (period_ms == NULL)) {
     return 0;
   }

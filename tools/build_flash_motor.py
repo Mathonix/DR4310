@@ -17,7 +17,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--motor-id', type=int, choices=range(1, 8), required=True)
     parser.add_argument('--flash', action='store_true')
+    parser.add_argument('--standard-tx', action='store_true', help='Use the original 20ms STATUS, 2048 ring, window 6 profile')
+    parser.add_argument('--uart-baud', type=int, choices=(200000,230400), default=200000,
+                        help='UART rate compiled into the new firmware')
     parser.add_argument('--serial-port', default='COM5')
+    parser.add_argument('--serial-baud', type=int, default=200000,
+                        help='Baud rate of the firmware currently on the device')
     parser.add_argument('--jlink-serial', type=int, default=29534567)
     parser.add_argument('--jlink-dll', default=r'C:\Program Files\SEGGER\JLink_V930a\JLink_x64.dll')
     args = parser.parse_args()
@@ -27,10 +32,14 @@ def main():
         if not bins:
             raise RuntimeError('Put arm-none-eabi-gcc on PATH first')
         env['PATH'] = str(bins[-1]) + os.pathsep + env['PATH']
-    subprocess.run(['cmake', '--preset', 'Release', f'-DMOTOR_CAN_ID={args.motor_id}'],
+    subprocess.run(['cmake', '--preset', 'Release', f'-DMOTOR_CAN_ID={args.motor_id}', f'-DDR4310_UART_BAUD={args.uart_baud}', f'-DAUDIO_LOW_TX_MODE={0 if args.standard_tx else 1}'],
                    cwd=ROOT, env=env, check=True)
     subprocess.run(['cmake', '--build', '--preset', 'Release'], cwd=ROOT, env=env, check=True)
     elf_path = ROOT / 'build/Release/4310_G431KBT6.elf'
+    hex_path = elf_path.with_suffix('.hex')
+    # CMake's ELF target does not regenerate a previously exported HEX.
+    subprocess.run(['arm-none-eabi-objcopy', '-O', 'ihex', str(elf_path), str(hex_path)],
+                   cwd=ROOT, env=env, check=True)
     from elftools.elf.elffile import ELFFile
     with elf_path.open('rb') as file:
         elf = ELFFile(file)
@@ -57,8 +66,11 @@ def main():
                 f'ELF overlaps calibration Flash at 0x{address:08X}')
         node_address = sym['st_value']
     manifest = {'motor_id': image_id, 'feedback_id': hex(0x204+image_id),
+                'uart_baud': args.uart_baud,
+                'audio_low_tx': not args.standard_tx,
                 'command_id': hex(0x1FE if image_id <= 4 else 0x2FE),
                 'elf_sha256': hashlib.sha256(elf_path.read_bytes()).hexdigest(),
+                'hex_sha256': hashlib.sha256(hex_path.read_bytes()).hexdigest(),
                 'flash_verified': False}
     manifest_path = elf_path.with_suffix('.manifest.json')
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
@@ -74,7 +86,7 @@ def main():
         j.set_tif(pylink.enums.JLinkInterfaces.SWD)
         j.connect('STM32G431KB', speed=1000)
         try:
-            uart = serial.Serial(args.serial_port, 115200, timeout=.1, write_timeout=1)
+            uart = serial.Serial(args.serial_port, args.serial_baud, timeout=.1, write_timeout=1)
         except serial.SerialException as exc:
             print('UART unavailable; flash allowed only if driver already disabled:', exc)
         if uart and not j.halted():

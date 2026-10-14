@@ -762,7 +762,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = DEVICE_UART_BAUD;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -1491,10 +1491,11 @@ static void CAN_ApplyControlFrame(uint32_t id, const uint8_t *data)
     return;
   }
 
-  /* In automatic-enable mode, CAN cannot explicitly disable the motor.
-   * Setpoint and control-mode commands remain accepted. */
+  /* Preserve the legacy automatic-enable policy outside audio. During an
+   * audio session or EXIT drain, CAN DISABLE/ESTOP must always reach Disable. */
   if ((ControlApp_GetAutoEnable() != 0U) &&
-      ((cmd == CAN_CMD_DISABLE) || (cmd == CAN_CMD_ESTOP)))
+      ((cmd == CAN_CMD_DISABLE) || (cmd == CAN_CMD_ESTOP)) &&
+      (ControlApp_AudioActive() == 0U))
   {
     can_control_rx_count++;
     return;

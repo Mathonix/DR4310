@@ -60,7 +60,7 @@ def main():
     import pylink
     import serial
     try:
-        uart = serial.Serial(args.serial_port, 115200, timeout=0.05, write_timeout=1)
+        uart = serial.Serial(args.serial_port, 200000, timeout=0.05, write_timeout=1)
     except serial.SerialException as exc:
         raise RuntimeError(
             f'{args.serial_port} is unavailable. Send STOP, stop cyclic commands, '

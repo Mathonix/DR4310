@@ -39,7 +39,7 @@ int StoreImage_Load(StoreImage *image) {
 int StoreImage_Save(const StoreImage *image, uint32_t *seq) {
   StoreImage prev;
   uint32_t s = StoreImage_Load(&prev) ? prev.sequence + 1U : 1U;
-  if (StoreRecord_Encode(image, s, g_flash, sizeof(g_flash)) != STORE_RECORD_V5_BYTES) return 0;
+  if (StoreRecord_Encode(image, s, g_flash, sizeof(g_flash)) != STORE_RECORD_V6_BYTES) return 0;
   g_flash_valid = 1;
   g_saves++;
   if (seq) *seq = s;
@@ -118,12 +118,12 @@ int main(void) {
   { StoreImage im; assert(StoreRecord_Decode(g_flash, sizeof(g_flash), &im));
     assert(im.version == 1 && im.calib_valid && !im.config_valid && im.sequence == 7 && im.electrical_zero_rad == 0.5f);
     assert(im.config.pos_vff == 1.0f); }
-  { StoreImage im; memset(&im, 0, sizeof(im)); uint8_t buf[STORE_RECORD_V5_BYTES];
+  { StoreImage im; memset(&im, 0, sizeof(im)); uint8_t buf[STORE_RECORD_V6_BYTES];
     im.calib_valid = 1; im.electrical_zero_rad = 1.0f; im.encoder_direction = 0; im.config_valid = 1; im.config.can_id = 5;
     im.config.spd_kp = 0.3f; im.config.pole_pairs = 14; im.config.can_baud = 1000000U;
-    assert(StoreRecord_Encode(&im, 9, buf, sizeof(buf)) == STORE_RECORD_V5_BYTES);
+    assert(StoreRecord_Encode(&im, 9, buf, sizeof(buf)) == STORE_RECORD_V6_BYTES);
     StoreImage out; assert(StoreRecord_Decode(buf, sizeof(buf), &out));
-    assert(out.version == 5 && out.sequence == 9 && out.config.can_id == 5 && out.config.spd_kp == 0.3f && out.calib_valid);
+    assert(out.version == 6 && out.sequence == 9 && out.config.can_id == 5 && out.config.spd_kp == 0.3f && out.calib_valid);
     assert(out.config.pos_vff == 0.0f);
     assert(out.config.pole_pairs == 14 && out.config.can_baud == 1000000U);
     buf[40] ^= 1; assert(!StoreRecord_Decode(buf, sizeof(buf), &out));
@@ -134,7 +134,7 @@ int main(void) {
   DeviceConfig_Init();
   assert(DeviceConfig_Source() == DEVCFG_SRC_FLASH_V1);
   assert(DeviceConfig_ActiveCanId() == MOTOR_CAN_ID && DeviceConfig_Live()->telemetry == 1);
-  assert(DeviceConfig_ParamCount() == 39);
+  assert(DeviceConfig_ParamCount() == 42);
   assert(control_max_modulation == DEVICE_MAX_MOD_DEFAULT);
   assert(control_ol_en == 0.0f);
   assert(control_ol_iq_a == IQ_CONTINUOUS_MAX_A);
@@ -152,7 +152,7 @@ int main(void) {
   assert(control_ls_h == DEVICE_DEFAULT_LS_H);
   assert(control_vbus_min_v == DEVICE_DEFAULT_VBUS_MIN_V);
   assert(control_vbus_max_v == DEVICE_DEFAULT_VBUS_MAX_V);
-  assert(DeviceConfig_MaxTelemHz() == 135);
+  assert(DeviceConfig_MaxTelemHz() == ((DEVICE_UART_BAUD / 10U) * 4U / 5U) / 68U);
   assert(DeviceConfig_CanPrescaler(1000000U) == 10U);
   assert(DeviceConfig_CanPrescaler(500000U) == 20U);
   assert(DeviceConfig_CanPrescaler(250000U) == 40U);
@@ -311,15 +311,18 @@ int main(void) {
     assert(DeviceConfig_ZeroIsSet() == 1 && control_zero_offset_rad == 1.25f);
     uint32_t period = 0;
     assert(DeviceConfig_TelemPeriodMs(100, &period) && period == 10U);
-    assert(DeviceConfig_TelemPeriodMs(135, &period) && period == 8U);
-    assert(DeviceConfig_SetTelemHz(142) == 1); /* quantizes to 125 Hz, still inside the budget */
-    assert(DeviceConfig_TelemPeriodMs(142, &period) && period == 8U);
-    assert(DeviceConfig_SetTelemHz(143) == 0);
+    const uint32_t budget = (DEVICE_UART_BAUD / 10U) * 4U / 5U;
+    const uint32_t minimum_period = (68000U + budget - 1U) / budget;
+    const uint16_t largest_request = (uint16_t)(999U / (minimum_period - 1U));
+    assert(DeviceConfig_TelemPeriodMs(DeviceConfig_MaxTelemHz(), &period) && period == minimum_period);
+    assert(DeviceConfig_SetTelemHz(largest_request) == 1);
+    assert(DeviceConfig_TelemPeriodMs(largest_request, &period) && period == minimum_period);
+    assert(DeviceConfig_SetTelemHz(largest_request + 1) == 0);
     assert(DeviceConfig_SetTelemHz(1000) == 0);
     assert(DeviceConfig_SetTelemHz(9) == 0);
     assert(DeviceConfig_SetTelemHz(100) == 1);
     uint8_t bad_ch[16] = {0};
-    bad_ch[0] = 29; /* one past OlBudget */
+    bad_ch[0] = DEVICE_TELEM_CHANNEL_COUNT; /* one past the extended catalogue */
     assert(DeviceConfig_SetTelemChannels(bad_ch, 16) == 0);
     bad_ch[0] = 28; /* OlBudget is a valid optional channel */
     assert(DeviceConfig_SetTelemChannels(bad_ch, 16) == 1);
@@ -390,7 +393,7 @@ int main(void) {
     assert(DeviceConfig_Source() == DEVCFG_SRC_INVALID);
     assert(DeviceConfig_ActiveCanId() == MOTOR_CAN_ID);
     StoreImage decoded; assert(StoreImage_Load(&decoded));
-    assert(decoded.calib_valid && decoded.electrical_zero_rad == 0.4f && decoded.version == 5);
+    assert(decoded.calib_valid && decoded.electrical_zero_rad == 0.4f && decoded.version == 6);
   }
 
   /* Old 0 V / 60 V (and a min above the new 39 V cap) load clamped, not invalid. */
@@ -475,7 +478,7 @@ int main(void) {
   control_rs_ohm = DEVICE_DEFAULT_RS_OHM; control_ls_h = DEVICE_DEFAULT_LS_H;
   DeviceConfig_Init();
   assert(DeviceConfig_Source() == DEVCFG_SRC_DEFAULT);
-  assert(DeviceConfig_ParamCount() == 39);
+  assert(DeviceConfig_ParamCount() == 42);
   {
     const int iq = DeviceConfig_FindParam("IQ_LIM");
     const int en = DeviceConfig_FindParam("OL_EN");
@@ -521,7 +524,7 @@ int main(void) {
   {
     const int mod = DeviceConfig_FindParam("MAX_MOD");
     const int tm = DeviceConfig_FindParam("OL_TIME_S");
-    assert(mod == (int)DeviceConfig_ParamCount() - 2);
+    assert(mod == (int)DeviceConfig_ParamCount() - 5);
     assert(tm >= 0 && mod > tm);
     assert(DeviceConfig_ParamInfo((size_t)mod)->min == DEVICE_MAX_MOD_MIN);
     assert(DeviceConfig_ParamInfo((size_t)mod)->max == DEVICE_MAX_MOD_MAX);
@@ -541,7 +544,7 @@ int main(void) {
     im.config = *DeviceConfig_Live();
     im.config.rs_ohm = 1.97f;
     memset(im.config.ol_reserved, 0, sizeof(im.config.ol_reserved));
-    assert(StoreRecord_Encode(&im, 4, g_flash, sizeof(g_flash)) == STORE_RECORD_V5_BYTES);
+    assert(StoreRecord_Encode(&im, 4, g_flash, sizeof(g_flash)) == STORE_RECORD_V6_BYTES);
     g_flash_valid = 1;
     control_max_modulation = 0.5f;
     control_rs_ohm = 1.0f;
@@ -553,7 +556,7 @@ int main(void) {
     float stored = 0.80f;
     im.config = *DeviceConfig_Live();
     memcpy(im.config.ol_reserved, &stored, sizeof(stored));
-    assert(StoreRecord_Encode(&im, 5, g_flash, sizeof(g_flash)) == STORE_RECORD_V5_BYTES);
+    assert(StoreRecord_Encode(&im, 5, g_flash, sizeof(g_flash)) == STORE_RECORD_V6_BYTES);
     control_max_modulation = DEVICE_MAX_MOD_DEFAULT;
     DeviceConfig_Init();
     assert(DeviceConfig_Source() == DEVCFG_SRC_FLASH);
@@ -561,14 +564,14 @@ int main(void) {
 
     stored = 1.5f;
     memcpy(im.config.ol_reserved, &stored, sizeof(stored));
-    assert(StoreRecord_Encode(&im, 6, g_flash, sizeof(g_flash)) == STORE_RECORD_V5_BYTES);
+    assert(StoreRecord_Encode(&im, 6, g_flash, sizeof(g_flash)) == STORE_RECORD_V6_BYTES);
     DeviceConfig_Init();
     assert(DeviceConfig_Source() == DEVCFG_SRC_FLASH);
     assert(control_max_modulation == DEVICE_MAX_MOD_DEFAULT);
 
     stored = nanf("");
     memcpy(im.config.ol_reserved, &stored, sizeof(stored));
-    assert(StoreRecord_Encode(&im, 7, g_flash, sizeof(g_flash)) == STORE_RECORD_V5_BYTES);
+    assert(StoreRecord_Encode(&im, 7, g_flash, sizeof(g_flash)) == STORE_RECORD_V6_BYTES);
     DeviceConfig_Init();
     assert(DeviceConfig_Source() == DEVCFG_SRC_FLASH);
     assert(control_max_modulation == DEVICE_MAX_MOD_DEFAULT);
@@ -606,15 +609,15 @@ int main(void) {
     assert(control_position_velocity_ff_gain == 1.0f && control_position_kp == 8.0f);
     assert(control_max_modulation == 0.8f && DeviceConfig_Live()->telem_ch[15] == 22);
     assert(StoreRecord_Encode(&decoded, 43, g_flash, sizeof(v4)) == 0);
-    assert(StoreRecord_Encode(&decoded, 43, g_flash, sizeof(g_flash)) == STORE_RECORD_V5_BYTES);
-    assert(StoreImage_Load(&decoded) && decoded.version == 5 && decoded.config.pos_vff == 1.0f);
+    assert(StoreRecord_Encode(&decoded, 43, g_flash, sizeof(g_flash)) == STORE_RECORD_V6_BYTES);
+    assert(StoreImage_Load(&decoded) && decoded.version == 6 && decoded.config.pos_vff == 1.0f);
   }
 
   /* POS_VFF: RAM writes are immediate; SAVE/boot preserves both 0 and 0.5.
    * Invalid v5 values reject the configuration rather than enabling FF. */
   {
     const int ff = DeviceConfig_FindParam("POS_VFF");
-    assert(ff == (int)DeviceConfig_ParamCount() - 1);
+    assert(ff == (int)DeviceConfig_ParamCount() - 4);
     assert(DeviceConfig_ParamInfo((size_t)ff)->min == 0.0f);
     assert(DeviceConfig_ParamInfo((size_t)ff)->max == 1.0f);
     assert(DeviceConfig_SetParam((size_t)ff, -0.01f) == DEVCFG_ERR_RANGE);
@@ -641,17 +644,91 @@ int main(void) {
     assert(StoreImage_Load(&im));
     im.config.pos_vff = 0.5f;
     memset(im.config.pos_reserved, 0xFF, sizeof(im.config.pos_reserved));
-    assert(StoreRecord_Encode(&im, 99, g_flash, sizeof(g_flash)) == STORE_RECORD_V5_BYTES);
+    assert(StoreRecord_Encode(&im, 99, g_flash, sizeof(g_flash)) == STORE_RECORD_V6_BYTES);
     assert(StoreImage_Load(&im) && im.config.pos_vff == 0.5f);
     for (size_t i = 0; i < sizeof(im.config.pos_reserved); ++i) assert(im.config.pos_reserved[i] == 0);
     g_flash[164] ^= 1; /* New field is covered by CRC. */
     assert(!StoreImage_Load(&im));
     im.config.pos_vff = 2.0f;
-    assert(StoreRecord_Encode(&im, 100, g_flash, sizeof(g_flash)) == STORE_RECORD_V5_BYTES);
+    assert(StoreRecord_Encode(&im, 100, g_flash, sizeof(g_flash)) == STORE_RECORD_V6_BYTES);
     control_position_velocity_ff_gain = DEVICE_POS_VFF_DEFAULT;
     DeviceConfig_Init();
     assert(DeviceConfig_Source() == DEVCFG_SRC_INVALID);
     assert(control_position_velocity_ff_gain == DEVICE_POS_VFF_DEFAULT);
+  }
+
+  /* Legacy v5 preserves its 152-byte prefix, with cogging off after migration. */
+  {
+    uint8_t v5[STORE_RECORD_V5_BYTES] = {0};
+    StoreImage source, decoded;
+    memset(&source, 0, sizeof(source));
+    DeviceConfig_RestoreDefaults();
+    DeviceConfig_Capture(&source.config);
+    source.config.pos_vff = 0.0f;
+    const uint32_t magic = STORE_RECORD_MAGIC;
+    const uint16_t version = STORE_RECORD_V5, length = sizeof(v5);
+    memcpy(v5, &magic, 4); memcpy(v5 + 4, &version, 2); memcpy(v5 + 6, &length, 2);
+    v5[18] = 1;
+    memcpy(v5 + 20, &source.config, 152);
+    const uint32_t crc = StoreRecord_Crc32(v5, 172);
+    memcpy(v5 + 172, &crc, 4);
+    assert(StoreRecord_Decode(v5, sizeof(v5), &decoded));
+    assert(decoded.version == 5 && !memcmp(&decoded.config, &source.config, 152));
+    assert(decoded.config.cog_en == 0 && decoded.config.cogging.valid == 0);
+    assert(decoded.config.cog_gain == 1 && decoded.config.cog_limit_a == .2f);
+    assert(DeviceConfig_Validate(&decoded.config));
+  }
+  /* Complete-map transaction, duplicate chunks, range validation, flash CRC,
+   * interrupted upload and recalibration invalidation. */
+  {
+    g_flash_valid = 0;
+    DeviceConfig_RestoreDefaults();
+    const size_t en = (size_t)DeviceConfig_FindParam("COG_EN");
+    const size_t gain = (size_t)DeviceConfig_FindParam("COG_GAIN");
+    const size_t limit = (size_t)DeviceConfig_FindParam("COG_LIM");
+    assert(DeviceConfig_SetParam(en, 1) == DEVCFG_ERR_RANGE);
+    assert(DeviceConfig_SetParam(gain, NAN) == DEVCFG_ERR_RANGE);
+    assert(DeviceConfig_SetParam(limit, 1.01f) == DEVCFG_ERR_RANGE);
+    int16_t values[16];
+    for (int i = 0; i < 16; ++i) values[i] = (int16_t)(i * 10 - 70);
+    assert(!DeviceConfig_CoggingSet(0, values, 16));
+    DeviceConfig_CoggingBegin();
+    assert(!DeviceConfig_Save(NULL));
+    assert(!DeviceConfig_CoggingCommit(.13f, 1, 14));
+    assert(DeviceConfig_CoggingSet(0, values, 16));
+    assert(DeviceConfig_CoggingSet(0, values, 16));
+    assert(DeviceConfig_CoggingWritten() == 16);
+    assert(!DeviceConfig_CoggingSet(511, values, 2));
+    values[15] = 1001;
+    assert(!DeviceConfig_CoggingSet(16, values, 16));
+    assert(DeviceConfig_CoggingWritten() == 16);
+    values[15] = 80;
+    for (unsigned i = 16; i < COGGING_TABLE_SIZE; i += 16)
+      assert(DeviceConfig_CoggingSet((uint16_t)i, values, 16));
+    assert(DeviceConfig_CoggingWritten() == COGGING_TABLE_SIZE);
+    assert(!DeviceConfig_CoggingCommit(NAN, 1, 14));
+    assert(!DeviceConfig_CoggingCommit(.13f, 2, 14));
+    assert(DeviceConfig_CoggingCommit(.13f, 1, 14));
+    assert(DeviceConfig_Live()->cog_en == 0);
+    assert(DeviceConfig_SetParam(en, 1) == DEVCFG_OK);
+    assert(DeviceConfig_SetParam(gain, .5f) == DEVCFG_OK);
+    assert(DeviceConfig_SetParam(limit, .15f) == DEVCFG_OK);
+    assert(DeviceConfig_Save(NULL));
+    DeviceConfig_CoggingClear();
+    assert(DeviceConfig_Reload() == DEVCFG_SRC_FLASH);
+    assert(DeviceConfig_Live()->cog_en == 1 && DeviceConfig_Live()->cog_gain == .5f);
+    assert(DeviceConfig_Live()->cogging.valid && DeviceConfig_Live()->cogging.current_ma[511] == 80);
+    assert(DeviceConfig_Live()->cogging.electrical_zero_rad == .13f);
+    g_flash[20 + offsetof(DeviceConfigData, cogging) + 500] ^= 1;
+    StoreImage bad;
+    assert(!StoreImage_Load(&bad));
+    assert(DeviceConfig_Save(NULL));
+    DeviceConfig_OnCalibrationSaved(1, 100);
+    assert(!DeviceConfig_Live()->cogging.valid && DeviceConfig_Live()->cog_en == 0);
+    DeviceConfig_CoggingBegin();
+    assert(DeviceConfig_CoggingUploading());
+    DeviceConfig_RestoreDefaults();
+    assert(!DeviceConfig_CoggingUploading() && DeviceConfig_Live()->cog_en == 0);
   }
 
   printf("test_uart_config: all passed (%zu params)\n", DeviceConfig_ParamCount());

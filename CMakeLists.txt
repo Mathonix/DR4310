@@ -55,7 +55,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Libraries/App/src/device_config.c
     Libraries/App/src/ascii_util.c
     Libraries/App/src/control_app.cpp
+    Libraries/App/src/motor_audio.cpp
+    Libraries/Control/src/audio_current.cpp
     Libraries/Control/src/foc_control.cpp
+    Libraries/Control/src/cogging_compensator.cpp
     Libraries/Control/src/overload_limiter.cpp
     Libraries/Control/src/speed_controller.cpp
     Libraries/Control/src/position_controller.cpp
@@ -88,9 +91,19 @@ if(NOT MOTOR_CAN_ID MATCHES "^[1-7]$")
     message(FATAL_ERROR "MOTOR_CAN_ID must be one integer in 1..7")
 endif()
 message(STATUS "Motor CAN ID: ${MOTOR_CAN_ID}")
+set(DR4310_UART_BAUD "200000" CACHE STRING "USART1 baud (200000 or 230400)")
+if(NOT DR4310_UART_BAUD MATCHES "^(200000|230400)$")
+    message(FATAL_ERROR "DR4310_UART_BAUD must be 200000 or 230400")
+endif()
+set(AUDIO_LOW_TX_MODE "1" CACHE STRING "Audio STATUS profile (0=20ms, 1=100ms)")
+if(NOT AUDIO_LOW_TX_MODE MATCHES "^[01]$")
+    message(FATAL_ERROR "AUDIO_LOW_TX_MODE must be 0 or 1")
+endif()
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     MOTOR_CAN_ID=${MOTOR_CAN_ID}
+    DEVICE_UART_BAUD=${DR4310_UART_BAUD}U
+    AUDIO_LOW_TX_MODE=${AUDIO_LOW_TX_MODE}
 )
 
 # Remove wrong libob.a library dependency when using cpp files

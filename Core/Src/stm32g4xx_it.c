@@ -22,6 +22,7 @@
 #include "stm32g4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "control_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -58,6 +59,7 @@
 extern TIM_HandleTypeDef htim1;
 /* USER CODE BEGIN EV */
 extern UART_HandleTypeDef huart1;
+extern DMA_HandleTypeDef hdma_usart1_rx;
 extern DMA_HandleTypeDef hdma_adc1;
 extern DMA_HandleTypeDef hdma_spi3_rx;
 extern DMA_HandleTypeDef hdma_spi3_tx;
@@ -239,5 +241,13 @@ void DMA1_Channel3_IRQHandler(void)
 void DMA1_Channel4_IRQHandler(void)
 {
   HAL_DMA_IRQHandler(&hdma_spi1_tx);
+}
+void DMA1_Channel5_IRQHandler(void)
+{
+  // Both boundaries pending: more than a half-buffer arrived unserviced.
+  // Treat the unread region as ambiguous instead of silently using old PCM.
+  if ((DMA1->ISR & (DMA_ISR_HTIF5 | DMA_ISR_TCIF5)) == (DMA_ISR_HTIF5 | DMA_ISR_TCIF5))
+    ControlApp_UartRxOverrunISR();
+  HAL_DMA_IRQHandler(&hdma_usart1_rx);
 }
 /* USER CODE END 1 */
