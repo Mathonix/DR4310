@@ -17,7 +17,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--motor-id', type=int, choices=range(1, 8), required=True)
     parser.add_argument('--flash', action='store_true')
+    parser.add_argument('--no-audio', action='store_true', default=True, help='Compatibility flag; main always builds standard firmware')
+    parser.add_argument('--legacy-math', action='store_true', help='A/B: old fmod path and -Os control math')
+    parser.add_argument('--keep-adc-half-irq', action='store_true', help='A/B: retain unused ADC half IRQ')
+    parser.add_argument('--keep-encoder-half-irq', action='store_true', help='A/B: retain unused encoder RX half IRQ')
+    parser.add_argument('--irq-profile', action='store_true', help='A/B: measure DMA IRQ handler bodies')
+    parser.add_argument('--build-dir', type=Path, help='Separate output directory (defaults to build/Standard for --no-audio)')
+    parser.add_argument('--standard-tx', action='store_true', help='Use the original 20ms STATUS, 2048 ring, window 6 profile')
+    parser.add_argument('--uart-baud', type=int, choices=(200000,230400), default=200000,
+                        help='UART rate compiled into the new firmware')
     parser.add_argument('--serial-port', default='COM5')
+    parser.add_argument('--serial-baud', type=int, default=200000,
+                        help='Baud rate of the firmware currently on the device')
     parser.add_argument('--jlink-serial', type=int, default=29534567)
     parser.add_argument('--jlink-dll', default=r'C:\Program Files\SEGGER\JLink_V930a\JLink_x64.dll')
     args = parser.parse_args()
@@ -27,10 +38,21 @@ def main():
         if not bins:
             raise RuntimeError('Put arm-none-eabi-gcc on PATH first')
         env['PATH'] = str(bins[-1]) + os.pathsep + env['PATH']
-    subprocess.run(['cmake', '--preset', 'Release', f'-DMOTOR_CAN_ID={args.motor_id}'],
+    build_dir = args.build_dir or ROOT / ('build/Standard' if args.no_audio else 'build/Release')
+    if not build_dir.is_absolute(): build_dir = ROOT / build_dir
+    subprocess.run(['cmake', '--preset', 'Release', '-B', str(build_dir), f'-DMOTOR_CAN_ID={args.motor_id}', f'-DDR4310_UART_BAUD={args.uart_baud}', '-DDR4310_AUDIO_ENABLED=0',
+                    f'-DDR4310_FOC_OPTIMIZE={"OFF" if args.legacy_math else "ON"}',
+                    f'-DDR4310_FAST_ANGLE_WRAP={"OFF" if args.legacy_math else "ON"}',
+                    f'-DDR4310_ADC_HALF_IRQ={"ON" if args.keep_adc_half_irq else "OFF"}',
+                    f'-DDR4310_ENCODER_HALF_IRQ={"ON" if args.keep_encoder_half_irq else "OFF"}',
+                    f'-DDR4310_IRQ_PROFILE={"ON" if args.irq_profile else "OFF"}'],
                    cwd=ROOT, env=env, check=True)
-    subprocess.run(['cmake', '--build', '--preset', 'Release'], cwd=ROOT, env=env, check=True)
-    elf_path = ROOT / 'build/Release/4310_G431KBT6.elf'
+    subprocess.run(['cmake', '--build', str(build_dir)], cwd=ROOT, env=env, check=True)
+    elf_path = build_dir / '4310_G431KBT6.elf'
+    hex_path = elf_path.with_suffix('.hex')
+    # CMake's ELF target does not regenerate a previously exported HEX.
+    subprocess.run(['arm-none-eabi-objcopy', '-O', 'ihex', str(elf_path), str(hex_path)],
+                   cwd=ROOT, env=env, check=True)
     from elftools.elf.elffile import ELFFile
     with elf_path.open('rb') as file:
         elf = ELFFile(file)
@@ -57,9 +79,19 @@ def main():
                 f'ELF overlaps calibration Flash at 0x{address:08X}')
         node_address = sym['st_value']
     manifest = {'motor_id': image_id, 'feedback_id': hex(0x204+image_id),
+                'uart_baud': args.uart_baud,
+                'audio_enabled': not args.no_audio,
+                'flavor': 'standard' if args.no_audio else 'music',
+                'audio_low_tx': not args.standard_tx if not args.no_audio else False,
                 'command_id': hex(0x1FE if image_id <= 4 else 0x2FE),
                 'elf_sha256': hashlib.sha256(elf_path.read_bytes()).hexdigest(),
+                'hex_sha256': hashlib.sha256(hex_path.read_bytes()).hexdigest(),
                 'flash_verified': False}
+    manifest.update(fast_angles=not args.legacy_math, adc_half_irq=args.keep_adc_half_irq,
+                    encoder_half_irq=args.keep_encoder_half_irq, irq_profile=args.irq_profile)
+    # Record the cached setting too: OFF is used for otherwise identical -Os A/B builds.
+    cache = (build_dir / 'CMakeCache.txt').read_text(encoding='utf-8')
+    manifest['foc_optimize'] = 'DR4310_FOC_OPTIMIZE:BOOL=ON' in cache.splitlines()
     manifest_path = elf_path.with_suffix('.manifest.json')
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
     print('IMAGE', json.dumps(manifest), flush=True)
@@ -74,7 +106,7 @@ def main():
         j.set_tif(pylink.enums.JLinkInterfaces.SWD)
         j.connect('STM32G431KB', speed=1000)
         try:
-            uart = serial.Serial(args.serial_port, 115200, timeout=.1, write_timeout=1)
+            uart = serial.Serial(args.serial_port, args.serial_baud, timeout=.1, write_timeout=1)
         except serial.SerialException as exc:
             print('UART unavailable; flash allowed only if driver already disabled:', exc)
         if uart and not j.halted():
@@ -84,6 +116,11 @@ def main():
         # Snapshot the two reserved calibration pages. Firmware updates must not
         # erase motor-specific calibration data.
         calibration_before = bytes(j.memory_read8(CALIBRATION_START, CALIBRATION_SIZE))
+        backup_path = build_dir / ('calibration-before-' + time.strftime('%Y%m%d-%H%M%S') + '.bin')
+        backup_path.write_bytes(calibration_before)
+        manifest['calibration_backup'] = str(backup_path)
+        manifest['calibration_sha256'] = hashlib.sha256(calibration_before).hexdigest()
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
         j.halt()
         assert j.halted()
         j.memory_write32(0x48001418, [1 << 16])  # PF0 driver disable

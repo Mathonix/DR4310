@@ -69,12 +69,15 @@ typedef struct {
   uint8_t calib_valid;
   uint8_t config_valid;
   uint8_t reserved;
-  DeviceConfigData config;
+  uint8_t config[152];
   uint32_t crc32;
 } RecordV5;
 
 typedef char DeviceConfigV2MustBe72Bytes[(sizeof(DeviceConfigV2) == 72U) ? 1 : -1];
-typedef char DeviceConfigMustBe152Bytes[(sizeof(DeviceConfigData) == 152U) ? 1 : -1];
+typedef char DeviceConfigMustBe1200Bytes[(sizeof(DeviceConfigData) == 1200U) ? 1 : -1];
+typedef char V6CoggingAt164[(offsetof(DeviceConfigData, cogging) == 164U) ? 1 : -1];
+typedef char V6FitsPage[(STORE_RECORD_V6_BYTES <= 2048U) ? 1 : -1];
+typedef char V6DoubleWordAligned[((STORE_RECORD_V6_BYTES % 8U) == 0U) ? 1 : -1];
 typedef char V3ExtStartsAt72[(offsetof(DeviceConfigData, pole_pairs) == 72U) ? 1 : -1];
 typedef char V3BaudAt100[(offsetof(DeviceConfigData, can_baud) == 100U) ? 1 : -1];
 typedef char V3ChannelsAt112[(offsetof(DeviceConfigData, telem_ch) == 112U) ? 1 : -1];
@@ -112,6 +115,8 @@ static void image_clear(StoreImage *out) {
   /* Legacy images had unconditional velocity feedforward. Set this before
    * copying their shorter prefixes so calibration-only saves also migrate. */
   out->config.pos_vff = 1.0f;
+  out->config.cog_gain = 1.0f;
+  out->config.cog_limit_a = COGGING_LIMIT_DEFAULT_A;
 }
 
 int StoreRecord_Decode(const uint8_t *buf, size_t len, StoreImage *out) {
@@ -216,7 +221,25 @@ int StoreRecord_Decode(const uint8_t *buf, size_t len, StoreImage *out) {
     out->config_valid = r.config_valid;
     out->electrical_zero_rad = r.electrical_zero_rad;
     out->encoder_direction = r.encoder_direction;
-    out->config = r.config;
+    memcpy(&out->config, r.config, sizeof(r.config));
+    return 1;
+  }
+  if ((version == STORE_RECORD_V6) && (size == STORE_RECORD_V6_BYTES) &&
+      (len >= STORE_RECORD_V6_BYTES)) {
+    uint32_t crc;
+    float zero;
+    memcpy(&crc, buf + size - 4U, 4U);
+    memcpy(&zero, buf + 12U, 4U);
+    if (crc != StoreRecord_Crc32(buf, size - 4U) || buf[17] > 1U ||
+        buf[18] > 1U || (buf[17] && !calib_ok(zero, buf[16]))) return 0;
+    image_clear(out);
+    out->version = STORE_RECORD_V6;
+    memcpy(&out->sequence, buf + 8U, 4U);
+    out->electrical_zero_rad = zero;
+    out->encoder_direction = buf[16];
+    out->calib_valid = buf[17];
+    out->config_valid = buf[18];
+    memcpy(&out->config, buf + 20U, sizeof(out->config));
     return 1;
   }
   return 0;
@@ -224,27 +247,30 @@ int StoreRecord_Decode(const uint8_t *buf, size_t len, StoreImage *out) {
 
 size_t StoreRecord_Encode(const StoreImage *in, uint32_t sequence,
                           uint8_t *buf, size_t len) {
-  RecordV5 r;
-  if ((in == NULL) || (buf == NULL) || (len < sizeof(r))) {
+  if ((in == NULL) || (buf == NULL) || (len < STORE_RECORD_V6_BYTES)) {
     return 0U;
   }
   if ((in->calib_valid != 0U) && !calib_ok(in->electrical_zero_rad, in->encoder_direction)) {
     return 0U;
   }
-  memset(&r, 0, sizeof(r));
-  r.magic = STORE_RECORD_MAGIC;
-  r.version = STORE_RECORD_V5;
-  r.size = (uint16_t)sizeof(r);
-  r.sequence = sequence;
-  r.electrical_zero_rad = in->electrical_zero_rad;
-  r.encoder_direction = (in->encoder_direction != 0U) ? 1U : 0U;
-  r.calib_valid = (in->calib_valid != 0U) ? 1U : 0U;
-  r.config_valid = (in->config_valid != 0U) ? 1U : 0U;
-  r.config = in->config;
-  r.config.zero_valid = (in->config.zero_valid != 0U) ? 1U : 0U;
-  r.config.ol_en = (in->config.ol_en != 0.0f) ? 1.0f : 0.0f;
-  memset(r.config.pos_reserved, 0, sizeof(r.config.pos_reserved));
-  r.crc32 = StoreRecord_Crc32((const uint8_t *)&r, offsetof(RecordV5, crc32));
-  memcpy(buf, &r, sizeof(r));
-  return sizeof(r);
+  const uint32_t magic = STORE_RECORD_MAGIC;
+  const uint16_t version = STORE_RECORD_V6, size = STORE_RECORD_V6_BYTES;
+  memset(buf, 0, STORE_RECORD_V6_BYTES);
+  memcpy(buf, &magic, 4U);
+  memcpy(buf + 4U, &version, 2U);
+  memcpy(buf + 6U, &size, 2U);
+  memcpy(buf + 8U, &sequence, 4U);
+  memcpy(buf + 12U, &in->electrical_zero_rad, 4U);
+  buf[16] = (in->encoder_direction != 0U) ? 1U : 0U;
+  buf[17] = (in->calib_valid != 0U) ? 1U : 0U;
+  buf[18] = (in->config_valid != 0U) ? 1U : 0U;
+  memcpy(buf + 20U, &in->config, sizeof(in->config));
+  buf[20U + offsetof(DeviceConfigData, zero_valid)] = !!in->config.zero_valid;
+  const float ol_en = (in->config.ol_en != 0.0f) ? 1.0f : 0.0f;
+  memcpy(buf + 20U + offsetof(DeviceConfigData, ol_en), &ol_en, 4U);
+  memset(buf + 20U + offsetof(DeviceConfigData, pos_reserved), 0, 4U);
+  memset(buf + 20U + offsetof(DeviceConfigData, cog_reserved), 0, 4U);
+  const uint32_t crc = StoreRecord_Crc32(buf, STORE_RECORD_V6_BYTES - 4U);
+  memcpy(buf + STORE_RECORD_V6_BYTES - 4U, &crc, 4U);
+  return STORE_RECORD_V6_BYTES;
 }

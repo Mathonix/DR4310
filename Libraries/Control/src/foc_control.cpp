@@ -1,7 +1,10 @@
 #include "FOCController.hpp"
+#include "AngleWrap.hpp"
 
 #include "SVPWM.hpp"
+#include "CoggingCompensator.hpp"
 #include "iq_limits.h"
+#include "motor_audio.h"
 
 #include <algorithm>
 #include <cmath>
@@ -20,10 +23,10 @@ constexpr float kDutyMin = 0.02f;
 /* Vertex duty is 0.5 + m/2, so m = 0.99 asks for 0.995.
  * PWM1 centers the high pulse on the valley. A higher duty moves both
  * edges farther from the CH4 strobe (CCR 80, ~0.47 us before the valley).
- * At 0.995 the nearer edge is still ~24 us away, far outside the ADC
- * aperture. kDutyMin stays 0.02: that phase's edge is already only a few
- * counts from the strobe, and the shunts are inline so this floor is about
- * edge noise, not a low-side conduction window. */
+ * At 0.995 and 40 kHz the nearer edge is still ~12 us away, outside the ADC
+ * aperture. kDutyMin stays 0.02: that phase's edge is already close to the
+ * strobe, and the shunts are inline so this floor is about edge noise, not
+ * a low-side conduction window. */
 constexpr float kDutyMax = 0.995f;
 /* DRV8313 peak hard trip (instant, ISR), separate from configured Iq work limit.
  * Do not raise this to follow OL_IQ. IQ_HARD_MAX_A stays strictly below it. */
@@ -32,8 +35,10 @@ static_assert(IQ_HARD_MAX_A < kOvercurrentTripA,
               "IQ_HARD_MAX_A must stay below the phase hard trip");
 /* 0 = standard d=flux / q=torque; 1 = experimental swap. */
 constexpr bool kSwapDq = false;
-/* Refresh PI output limits every N FOC ticks (~1 kHz at 20 kHz). */
-constexpr uint32_t kVmaxUpdateDivider = 20U;
+/* Refresh PI output limits at 1 kHz, independent of the carrier rate. */
+constexpr uint32_t kVmaxUpdateDivider = DR4310_FOC_HZ / 1000U;
+static_assert(DR4310_FOC_HZ % 1000U == 0U, "FOC rate must be a multiple of 1 kHz");
+static_assert(DR4310_PWM_ARR == 2124U, "40 kHz center-aligned ARR");
 /* Low-pass on electrical speed written from the 1 kHz loop. */
 constexpr float kOmegaEFilterAlpha = 0.12f;
 /*
@@ -49,12 +54,7 @@ float FocController::Clamp(float value, float low, float high) {
 }
 
 float FocController::Wrap0To2Pi(float angle) {
-  constexpr float kTwoPi = 6.28318530718f;
-  angle = std::fmod(angle, kTwoPi);
-  if (angle < 0.0f) {
-    angle += kTwoPi;
-  }
-  return angle;
+  return angle::Wrap0To2Pi(angle);
 }
 
 void FocController::WritePwm(float duty_a, float duty_b, float duty_c) {
@@ -144,6 +144,7 @@ void FocController::ApplyModulationSc(float sin_t,
 }
 
 void FocController::TripOvercurrent() {
+  audio::Global().abortSafety(audio::Reason::SafetyFault);
   state_.enabled = 0U;
   state_.open_loop_voltage_enable = 0U;
   state_.duty_a = 0.0f;
@@ -261,7 +262,13 @@ void FocController::SetMaxModulation(float max_mod) {
 
 void FocController::SetRefs(float id_ref_a, float iq_ref_a) {
   state_.id_ref_a = id_ref_a;
+  iq_command_a_ = iq_ref_a;
   state_.iq_ref_a = Clamp(iq_ref_a, -iq_limit_, iq_limit_);
+}
+
+void FocController::SetCoggingFeedforward(float iq_a) {
+  state_.cogging_iq_a = std::isfinite(iq_a) ?
+      Clamp(iq_a, -COGGING_LIMIT_MAX_A, COGGING_LIMIT_MAX_A) : 0.0f;
 }
 
 void FocController::SetElectricalAngle(float electrical_angle_rad) {
@@ -294,6 +301,8 @@ void FocController::SetOpenLoopVoltage(uint8_t enable,
 }
 
 void FocController::OnPwmUpdate() {
+  state_.audio_cmd_a=0;
+  if(audio::Global().stopRequested())Enable(0);
   if (isr_busy_ != 0U) {
     state_.isr_overrun_count++;
     return;
@@ -335,14 +344,9 @@ void FocController::OnPwmUpdate() {
     return;
   }
 
-  if (bus_v < min_bus_v_) {
-    Enable(0U);
-    WritePwm(0.0f, 0.0f, 0.0f);
-    isr_busy_ = 0U;
-    return;
-  }
+  /* ISR undervoltage trip removed: DRV8313 has built-in UVLO. */
 
-  /* PI voltage limits: update at ~1 kHz, not every 50 us. */
+  /* PI voltage limits: update at 1 kHz, not every carrier. */
   if (++vmax_div_ >= kVmaxUpdateDivider) {
     vmax_div_ = 0U;
     cached_vmax_ = VoltageLimit(bus_v);
@@ -377,6 +381,13 @@ void FocController::OnPwmUpdate() {
     state_.iq_a = iq_calc;
   }
 
+  if (audio::Global().gate() &&
+      (state_.open_loop_voltage_enable || state_.angle_override_enable ||
+       !std::isfinite(state_.id_a) || !std::isfinite(state_.iq_a) ||
+       std::fabs(state_.id_a)>kOvercurrentTripA || std::fabs(state_.iq_a)>kOvercurrentTripA)) {
+    audio::Global().abortSafety(audio::Reason::SafetyFault);
+    Enable(0);isr_busy_=0;return;
+  }
   if (state_.open_loop_voltage_enable != 0U) {
     if constexpr (kSwapDq) {
       ApplyModulationSc(sin_t,
@@ -395,11 +406,23 @@ void FocController::OnPwmUpdate() {
     return;
   }
 
-  state_.iq_ref_a = Clamp(state_.iq_ref_a, -iq_limit_, iq_limit_);
+  // Recompute from the base command every tick; never accumulate feedforward.
+  state_.iq_ref_a = CoggingCompensator::Combine(iq_command_a_,
+                                               state_.cogging_iq_a, iq_limit_);
 
+  float id_cmd=state_.id_ref_a,iq_cmd=state_.iq_ref_a;
+#if DR4310_AUDIO_ENABLED
+  if(audio::Global().gate()) {
+    state_.audio_cmd_a=audio::Global().tick20kHz();
+    if(audio::Global().stopRequested()) {Enable(0);isr_busy_=0;return;}
+    audio::LimitAudioVector(id_cmd,iq_cmd,state_.audio_cmd_a,
+                          audio::Global().axis()==audio::Axis::Q,
+                          audio::Global().amplitudeA(),iq_limit_);
+  }
+#endif
   const CurrentLoopVoltage voltage =
-      current_loop_.update(state_.id_ref_a,
-                           state_.iq_ref_a,
+      current_loop_.update(id_cmd,
+                           iq_cmd,
                            state_.id_a,
                            state_.iq_a,
                            kFocDtS);

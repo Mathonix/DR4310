@@ -27,16 +27,16 @@ struct RotorState {
 
 class RotorEstimator {
  public:
-  static constexpr uint32_t kVelocityWindowSamples = 5U;
+  static constexpr uint32_t kVelocityWindowSamples = 5U;  /* 1 kHz host loop: 5 ms window (telemetry/fallback only) */
   /* 5 samples at 1 kHz ~ 5 ms: quantization improves about 5x vs raw 1ms
    * while keeping less phase lag than a 10ms window. */
-  static constexpr float kPllBandwidthHz = 20.0f;
+  static constexpr float kPllBandwidthHz = 50.0f;  /* 2026-10-21: 50 Hz measured best for 1 rpm PLL speed feedback */
   static constexpr float kPllDamping = 0.8f;
   static constexpr float kMaxInnovationRad = 0.25f;
   static constexpr float kMaxAbsVelocityRadS = 200.0f;
-  /* Require 50 ms of continuous rejection at the 10 kHz encoder rate before
+  /* Require 50 ms of continuous rejection at the 20 kHz encoder rate before
    * re-locking. A shorter window can lock onto a burst of EMI-corrupted data. */
-  static constexpr uint32_t kMaxRejectedInnovations = 500U;
+  static constexpr uint32_t kMaxRejectedInnovations = 1000U;
 
   void reset(float angle_rad);
   void reset(float angle_rad, uint32_t timestamp_cycles);

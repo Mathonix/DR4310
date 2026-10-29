@@ -1,4 +1,5 @@
 #include "CordicMath.hpp"
+#include "AngleWrap.hpp"
 
 #include "stm32g4xx.h"
 
@@ -12,8 +13,6 @@ namespace {
 
 constexpr float kRadToQ31Scale = 683565275.5764316f;
 constexpr float kQ31ToF32Scale = 1.0f / 2147483648.0f;
-constexpr float kTwoPi = 6.28318530718f;
-constexpr float kPi = 3.14159265359f;
 constexpr uint32_t kMaxReadyWait = 32U;
 
 }  // namespace
@@ -43,13 +42,7 @@ void CordicMath::init() {
 }
 
 float CordicMath::WrapPmPi(float angle) {
-  angle = std::fmod(angle, kTwoPi);
-  if (angle > kPi) {
-    angle -= kTwoPi;
-  } else if (angle < -kPi) {
-    angle += kTwoPi;
-  }
-  return angle;
+  return angle::WrapPmPi(angle);
 }
 
 int32_t CordicMath::RadToQ31(float angle_rad) {

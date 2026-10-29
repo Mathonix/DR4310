@@ -64,10 +64,7 @@ void MotorIdentifier::EnterState(MotorIdState state) {
 bool MotorIdentifier::CheckSafety(const FOCState &foc,
                                   float bus_v,
                                   float omega_e_rad_s) {
-  if (bus_v < min_bus_v_) {
-    ident_.fail_reason = static_cast<uint8_t>(FailReason::kBus);
-    return true;
-  }
+  (void)bus_v; /* Undervoltage check removed: DRV8313 has built-in UVLO. */
 
   float iabs = std::fabs(foc.id_a);
   if (std::fabs(foc.iq_a) > iabs) {

@@ -56,6 +56,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Libraries/App/src/ascii_util.c
     Libraries/App/src/control_app.cpp
     Libraries/Control/src/foc_control.cpp
+    Libraries/Control/src/cogging_compensator.cpp
     Libraries/Control/src/overload_limiter.cpp
     Libraries/Control/src/speed_controller.cpp
     Libraries/Control/src/position_controller.cpp
@@ -72,7 +73,36 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Libraries/Hardware/src/CurrentSense.cpp
     Libraries/Hardware/src/MT6701.cpp
     Libraries/Hardware/src/HardwareBridge.cpp
+    Core/Src/dma_irq_profile.c
 )
+
+# main builds the standard controller. Keep v6 parameter/cogging compatibility
+# with the shared code, but do not link any audio receiver or PCM implementation.
+set(DR4310_AUDIO_ENABLED "0" CACHE STRING "Standard branch: audio is disabled")
+if(NOT DR4310_AUDIO_ENABLED STREQUAL "0")
+    message(FATAL_ERROR "main is the standard firmware branch; DR4310_AUDIO_ENABLED must be 0")
+endif()
+set(DR4310_UART_BAUD "200000" CACHE STRING "USART1 line rate")
+if(NOT DR4310_UART_BAUD MATCHES "^(200000|230400)$")
+    message(FATAL_ERROR "DR4310_UART_BAUD must be 200000 or 230400")
+endif()
+option(DR4310_FOC_OPTIMIZE "Use -O2 for Release control math" ON)
+option(DR4310_FAST_ANGLE_WRAP "Bypass fmod for already bounded angles" ON)
+option(DR4310_ADC_HALF_IRQ "Keep unused ADC half IRQ for A/B measurement" OFF)
+option(DR4310_ENCODER_HALF_IRQ "Keep unused encoder RX half IRQ for A/B measurement" OFF)
+option(DR4310_IRQ_PROFILE "Instrument DMA IRQ handler bodies for A/B measurement" OFF)
+if(DR4310_FOC_OPTIMIZE)
+    set_property(SOURCE
+        Libraries/Control/src/foc_control.cpp
+        Libraries/Control/src/rotor_estimator.cpp
+        Libraries/Control/src/cordic_math.cpp
+        Libraries/Control/src/electrical_angle.cpp
+        Libraries/Control/src/cogging_compensator.cpp
+        Libraries/Control/src/current_loop.cpp
+        Libraries/Control/src/pid.cpp
+        APPEND PROPERTY COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>"
+    )
+endif()
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
@@ -91,6 +121,13 @@ message(STATUS "Motor CAN ID: ${MOTOR_CAN_ID}")
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     MOTOR_CAN_ID=${MOTOR_CAN_ID}
+    DEVICE_UART_BAUD=${DR4310_UART_BAUD}U
+    DR4310_AUDIO_ENABLED=0
+    DR4310_FOC_OPTIMIZE=$<BOOL:${DR4310_FOC_OPTIMIZE}>
+    DR4310_FAST_ANGLE_WRAP=$<BOOL:${DR4310_FAST_ANGLE_WRAP}>
+    DR4310_ADC_HALF_IRQ=$<BOOL:${DR4310_ADC_HALF_IRQ}>
+    DR4310_ENCODER_HALF_IRQ=$<BOOL:${DR4310_ENCODER_HALF_IRQ}>
+    DR4310_IRQ_PROFILE=$<BOOL:${DR4310_IRQ_PROFILE}>
 )
 
 # Remove wrong libob.a library dependency when using cpp files

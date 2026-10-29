@@ -1,4 +1,5 @@
 #include "CurrentSense.hpp"
+#include "DmaIrqControls.h"
 
 #include "HardwareBridge.h"
 
@@ -367,6 +368,7 @@ HAL_StatusTypeDef CurrentSense::startHw() {
                         kAdcDmaRankCount) != HAL_OK) {
     return HAL_ERROR;
   }
+  DmaIrq_ConfigureAdc(&hdma_adc1);
 
   /*
    * Force destination address. Observed field failure: CMAR pointed into

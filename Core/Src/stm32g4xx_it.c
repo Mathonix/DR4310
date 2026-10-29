@@ -20,8 +20,10 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stm32g4xx_it.h"
+#include "dma_irq_profile.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "control_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -58,6 +60,7 @@
 extern TIM_HandleTypeDef htim1;
 /* USER CODE BEGIN EV */
 extern UART_HandleTypeDef huart1;
+extern DMA_HandleTypeDef hdma_usart1_rx;
 extern DMA_HandleTypeDef hdma_adc1;
 extern DMA_HandleTypeDef hdma_spi3_rx;
 extern DMA_HandleTypeDef hdma_spi3_tx;
@@ -214,7 +217,9 @@ void USART1_IRQHandler(void)
   */
 void DMA1_Channel1_IRQHandler(void)
 {
+  const uint32_t start = DmaIrqProfile_Begin(0U, &hdma_adc1);
   HAL_DMA_IRQHandler(&hdma_adc1);
+  DmaIrqProfile_End(0U, start);
 }
 
 /**
@@ -222,7 +227,9 @@ void DMA1_Channel1_IRQHandler(void)
   */
 void DMA1_Channel2_IRQHandler(void)
 {
+  const uint32_t start = DmaIrqProfile_Begin(1U, &hdma_spi3_rx);
   HAL_DMA_IRQHandler(&hdma_spi3_rx);
+  DmaIrqProfile_End(1U, start);
 }
 
 /**
@@ -230,7 +237,9 @@ void DMA1_Channel2_IRQHandler(void)
   */
 void DMA1_Channel3_IRQHandler(void)
 {
+  const uint32_t start = DmaIrqProfile_Begin(2U, &hdma_spi3_tx);
   HAL_DMA_IRQHandler(&hdma_spi3_tx);
+  DmaIrqProfile_End(2U, start);
 }
 
 /**
@@ -239,5 +248,13 @@ void DMA1_Channel3_IRQHandler(void)
 void DMA1_Channel4_IRQHandler(void)
 {
   HAL_DMA_IRQHandler(&hdma_spi1_tx);
+}
+void DMA1_Channel5_IRQHandler(void)
+{
+  // Both boundaries pending: more than a half-buffer arrived unserviced.
+  // Treat the unread region as ambiguous instead of silently using old PCM.
+  if ((DMA1->ISR & (DMA_ISR_HTIF5 | DMA_ISR_TCIF5)) == (DMA_ISR_HTIF5 | DMA_ISR_TCIF5))
+    ControlApp_UartRxOverrunISR();
+  HAL_DMA_IRQHandler(&hdma_usart1_rx);
 }
 /* USER CODE END 1 */

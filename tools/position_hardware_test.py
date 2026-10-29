@@ -18,8 +18,8 @@ DLL = r'C:\Program Files\SEGGER\JLink_V930a\JLink_x64.dll'
 
 
 class Uart:
-    def __init__(self):
-        self.port = serial.Serial('COM5', 115200, timeout=.03, write_timeout=1)
+    def __init__(self, port='COM5', baud=200000):
+        self.port = serial.Serial(port, baud, timeout=.03, write_timeout=1)
         self.events = []
 
     def command(self, text, timeout=2):
@@ -59,9 +59,13 @@ class Uart:
 
 def probe():
     j = pylink.JLink(lib=pylink.library.Library(dllpath=DLL))
-    j.open(serial_no=29534567)
-    j.set_tif(pylink.enums.JLinkInterfaces.SWD)
-    j.connect('STM32G431KB', speed=1000)
+    try:
+        j.open(serial_no=29534567)
+        j.set_tif(pylink.enums.JLinkInterfaces.SWD)
+        j.connect('STM32G431KB', speed=1000)
+    except BaseException:
+        j.close()
+        raise
     return j
 
 
@@ -112,6 +116,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('action', choices=['backup', 'test'])
     ap.add_argument('--out', required=True)
+    ap.add_argument('--port', default='COM5')
+    ap.add_argument('--baud', type=int, choices=(200000, 230400), default=200000)
     ap.add_argument('--retry', action='store_true', help='Migration/persistence already checked; retry motion with restored original profile')
     ap.add_argument('--original-gains', action='store_true', help='Keep the saved PID gains; retain conservative motion/current limits')
     args = ap.parse_args()
@@ -124,7 +130,7 @@ def main():
     original_telem = None
     symbols = None
     try:
-        uart = Uart()
+        uart = Uart(args.port, args.baud)
         uart.command('STOP')
         original_telem = int(uart.info()['telem'])
         if args.action=='backup' and (out/'backup-result.json').exists():

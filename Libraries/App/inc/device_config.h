@@ -1,6 +1,11 @@
 #ifndef DEVICE_CONFIG_H
 #define DEVICE_CONFIG_H
 
+/* USART1 line rate, shared by initialization and telemetry bandwidth checks. */
+#ifndef DEVICE_UART_BAUD
+#define DEVICE_UART_BAUD 200000U
+#endif
+
 /*
  * Persistent device configuration.
  *
@@ -16,6 +21,7 @@
  *   version stay v4. A stored 0 (older images) loads as DEVICE_MAX_MOD_DEFAULT.
  * - POS_VFF extends the record to v5. v1..v4 load with feedforward gain 1;
  *   v5 distinguishes an explicit 0 from the legacy default.
+ * - v6 adds a motor-specific cogging map. Legacy records leave it disabled.
  */
 
 #include <stddef.h>
@@ -55,7 +61,7 @@ extern "C" {
 #define DEVICE_DEFAULT_LS_H 0.005f
 #define DEVICE_DEFAULT_KT 0.0f
 #define DEVICE_TELEM_SLOTS 16U
-#define DEVICE_TELEM_CHANNEL_COUNT 29U
+#define DEVICE_TELEM_CHANNEL_COUNT 31U
 
 /* 170 MHz FDCAN kernel, 17 time quanta (sync + seg1 13 + seg2 3). */
 #define DEVICE_CAN_TQ 17U
@@ -64,7 +70,7 @@ extern "C" {
 typedef enum {
   DEVCFG_SRC_DEFAULT = 0, /* no valid flash record */
   DEVCFG_SRC_FLASH_V1 = 1, /* calibration-only record: config = defaults */
-  DEVCFG_SRC_FLASH = 2,    /* v2..v5 record with valid config */
+  DEVCFG_SRC_FLASH = 2,    /* v2..v6 record with valid config */
   DEVCFG_SRC_INVALID = 3,  /* record whose config failed range checks */
 } DeviceConfigSource;
 
@@ -98,6 +104,16 @@ static inline uint32_t DeviceConfig_CanPrescaler(uint32_t baud) {
 void DeviceConfig_Init(void);
 
 const DeviceConfigData *DeviceConfig_Live(void);
+/* Main-loop upload API. Caller must hold IDLE with the driver disabled.
+ * BEGIN disables/invalidates the RAM map; COMMIT requires all 512 samples.
+ * An interrupted upload never becomes valid or gets saved. */
+void DeviceConfig_CoggingBegin(void);
+int DeviceConfig_CoggingSet(uint16_t start, const int16_t *ma, size_t count);
+int DeviceConfig_CoggingCommit(float electrical_zero_rad, uint8_t direction,
+                              uint8_t pole_pairs);
+void DeviceConfig_CoggingClear(void);
+uint16_t DeviceConfig_CoggingWritten(void);
+int DeviceConfig_CoggingUploading(void);
 uint8_t DeviceConfig_ActiveCanId(void); /* the ID the CAN side runs with */
 DeviceConfigSource DeviceConfig_Source(void);
 const char *DeviceConfig_SourceName(void);
@@ -129,7 +145,7 @@ const uint8_t *DeviceConfig_TelemChannels(void);
 int DeviceConfig_SetTelemChannels(const uint8_t *channels, size_t count);
 uint16_t DeviceConfig_TelemHz(void);
 int DeviceConfig_SetTelemHz(uint16_t hz);
-/* Highest requested rate whose 68-byte frames fit in 80% of 115200 8N1. */
+/* Nominal rate whose 68-byte frames fit in 80% of DEVICE_UART_BAUD 8N1. */
 uint16_t DeviceConfig_MaxTelemHz(void);
 /* 1 if hz is 10..1000 and the quantized 1 ms period fits the UART budget. */
 int DeviceConfig_TelemPeriodMs(uint16_t hz, uint32_t *period_ms);

@@ -2,12 +2,16 @@
 #include "calibration_store.h"
 #include "ascii_util.h"
 #include "device_config.h"
+#include "motor_audio.h"
+#include "uart_dma_cursor.h"
 
 #include "ControlTiming.hpp"
 #include "CurrentSense.hpp"
 #include "MT6701.hpp"
 #include "HardwareBridge.h"
 #include "FOCController.hpp"
+#include "foc_timing.h"
+#include "CoggingCompensator.hpp"
 #include "OverloadLimiter.hpp"
 #include "SpeedController.hpp"
 #include "PositionController.hpp"
@@ -66,7 +70,7 @@ constexpr float kOpenLoopModMax = 0.050f;
  * produces positive canonical mechanical velocity on this board. */
 constexpr float kTorqueIqSign = 1.0f;
 /* 16 JustFloat channels at 100 Hz use about 6.8 kB/s, safely below the
- * 115200-baud UART payload limit while leaving room for RX commands. */
+ * UART payload limit while leaving room for RX commands. */
 constexpr uint32_t kVofaDebugPeriodMs = 10U;
 constexpr uint32_t kVofaDebugTimeoutMs = 20U;
 constexpr uint8_t kVofaJustfloatTail0 = 0x00U;
@@ -79,7 +83,7 @@ constexpr uint8_t kDefaultEncoderDirection = 1U;
 constexpr uint32_t kEncoderValidWindowCycles = 340000U;
 constexpr uint32_t kEncoderFaultTimeoutCycles = 1700000U;
 constexpr uint32_t kEncoderMinValidSamplesForFault = 10U;
-constexpr uint32_t kEncoderTriggerDivider = 2U;
+constexpr uint32_t kEncoderTriggerDivider = DR4310_ENCODER_DIVIDER;
 constexpr uint16_t kDrvFaultSettleMs = 20U;
 constexpr uint16_t kDrvFaultLowDebounceMs = 5U;
 constexpr uint32_t kCpuClockHz = 170000000U;
@@ -92,7 +96,6 @@ constexpr size_t kVofaFrameBytes = (kVofaFrameValueCount * sizeof(float)) + 4U;
 constexpr size_t kUartTxQueueBytes = 1024U;
 constexpr size_t kUartTxTelemetryHighWater = 3U * kVofaFrameBytes;
 constexpr size_t kUartTxChunkBytes = 128U;
-constexpr size_t kVofaRxRingBytes = 256U;
 /* TCH carries 16 channel names. 191 payload characters plus the terminator. */
 constexpr size_t kVofaCommandMaxBytes = 192U;
 constexpr size_t kUartMaxTokens = 20U;
@@ -142,34 +145,55 @@ size_t g_uart_txq_tail = 0U; /* read index (main loop only) */
 volatile uint8_t g_vofa_tx_busy = 0U;
 volatile uint32_t g_uart_tx_drop_count = 0U;
 UART_HandleTypeDef *g_vofa_uart = nullptr;
-uint8_t g_vofa_rx_byte = 0U;
-std::array<uint8_t, kVofaRxRingBytes> g_vofa_rx_ring = {};
-volatile uint16_t g_vofa_rx_head = 0U;
-volatile uint16_t g_vofa_rx_tail = 0U;
+alignas(4) std::array<uint8_t, audio::DmaCursor::Capacity> g_uart_rx_dma = {};
+volatile uint32_t g_uart_rx_halves = 0U;
+volatile uint32_t g_uart_rx_errors = 0U;
+volatile uint32_t g_uart_rx_hw_errors = 0U;
+volatile uint32_t g_uart_rx_last_hw_error = 0U;
+volatile uint32_t g_uart_rx_irq_losses = 0U;
+volatile uint32_t g_uart_tx_start_failures = 0U;
+volatile uint8_t g_uart_rx_ready = 0U;
+audio::DmaCursor g_uart_rx_cursor;
+bool g_audio_exit_draining = false;
 
-void VofaRxPushFromIsr(uint8_t byte) {
-  const uint16_t next_head =
-      static_cast<uint16_t>((g_vofa_rx_head + 1U) % kVofaRxRingBytes);
-  if (next_head != g_vofa_rx_tail) {
-    g_vofa_rx_ring[g_vofa_rx_head] = byte;
-    g_vofa_rx_head = next_head;
+uint32_t UartRxWriteTotal() {
+  if (!g_uart_rx_ready || !g_vofa_uart || !g_vofa_uart->hdmarx) return 0;
+  for (;;) {
+    const uint32_t mask=__get_PRIMASK(); __disable_irq();
+    const uint32_t halves=g_uart_rx_halves;
+    const uint32_t ndtr=__HAL_DMA_GET_COUNTER(g_vofa_uart->hdmarx);
+    __set_PRIMASK(mask);
+    if (halves==g_uart_rx_halves) return audio::DmaCursor::produced(halves,ndtr);
   }
 }
-
 bool VofaRxPop(uint8_t &byte) {
-  if (g_vofa_rx_tail == g_vofa_rx_head) {
+  // Keep cursor observation/pop in the same RX epoch as the DMA snapshot.
+  // A UART error IRQ must not reset the producer between these operations.
+  const uint32_t mask=__get_PRIMASK();__disable_irq();
+  if (!g_uart_rx_ready || g_uart_rx_errors) {__set_PRIMASK(mask);return false;}
+  const uint32_t total=UartRxWriteTotal();
+  if (!g_uart_rx_cursor.observe(total,HAL_GetTick())) {
+    g_uart_rx_errors|=1U;
+    __set_PRIMASK(mask);
+    audio::Global().abortSafety(audio::Reason::ProtocolError);
     return false;
   }
-  byte = g_vofa_rx_ring[g_vofa_rx_tail];
-  g_vofa_rx_tail =
-      static_cast<uint16_t>((g_vofa_rx_tail + 1U) % kVofaRxRingBytes);
-  return true;
+  const bool popped=g_uart_rx_cursor.pop(g_uart_rx_dma.data(),total,byte);
+  __set_PRIMASK(mask);return popped;
 }
-
 void VofaStartReceive(UART_HandleTypeDef *uart) {
-  if (uart != nullptr) {
-    (void)HAL_UART_Receive_IT(uart, &g_vofa_rx_byte, 1U);
-  }
+  if (!uart) return;
+  // Main-context restart only. Reset both counters before exposing DMA data;
+  // discard the bad RDR byte and latched error flags before enabling DMAR.
+  const uint32_t mask=__get_PRIMASK();__disable_irq();
+  g_uart_rx_ready=0;g_uart_rx_halves=0;
+  g_uart_rx_cursor.reset(0,HAL_GetTick());
+  __HAL_UART_CLEAR_FLAG(uart,UART_CLEAR_PEF|UART_CLEAR_FEF|UART_CLEAR_NEF|UART_CLEAR_OREF);
+  __HAL_UART_SEND_REQ(uart,UART_RXDATA_FLUSH_REQUEST);
+  if (HAL_UART_Receive_DMA(uart,g_uart_rx_dma.data(),g_uart_rx_dma.size())==HAL_OK) {
+    g_uart_rx_ready=1;
+  } else g_uart_rx_errors|=2U;
+  __set_PRIMASK(mask);
 }
 
 size_t UartTxUsed() {
@@ -196,6 +220,9 @@ bool UartTxEnqueue(const uint8_t *data, size_t len, size_t limit) {
   }
   return true;
 }
+bool AudioStatusSink(const uint8_t *data,size_t length,void *) {
+  return UartTxEnqueue(data,length,kUartTxQueueBytes-1);
+}
 
 void VofaPump(UART_HandleTypeDef *uart) {
   if ((uart == nullptr) || (g_vofa_tx_busy != 0U)) {
@@ -214,6 +241,7 @@ void VofaPump(UART_HandleTypeDef *uart) {
                            static_cast<uint16_t>(n)) != HAL_OK) {
     g_vofa_tx_busy = 0U;
     g_uart_tx_drop_count++;
+    g_uart_tx_start_failures++;
   }
 }
 
@@ -284,6 +312,11 @@ volatile float control_mit_iq_ff_a = 0.0f;
 volatile uint32_t control_cycle_clock_recovery_count = 0U;
 volatile uint8_t control_debug_cmd = 0U;
 volatile float control_debug_speed_ref_rad_s = 0.0f;
+/* Speed/position/MIT loop velocity feedback: 1 = 20 kHz PLL omega_est
+ * (default), 0 = legacy 1 kHz window difference. Live-tunable over SWD. */
+volatile uint8_t control_speed_fb_pll = 1U;
+/* Rotor PLL bandwidth (Hz), live-tunable; clamped to [5, 400]. */
+volatile float control_pll_bandwidth_hz = control::RotorEstimator::kPllBandwidthHz;
 
 namespace app {
 
@@ -333,6 +366,13 @@ class ApplicationController {
   bool ReplyParam(size_t index);
   void ServiceGetStream();
   void ReplyInfo();
+  void ExecuteCoggingCommand(char **tokens, size_t count);
+  void ExecuteAudioCommand(char **tokens,size_t count);
+  void StopAudioMotion();
+  void BeforeExternalAudioCommand();
+  bool CurrentSampleFresh() const;
+  bool audio_internal_stop_ = false;
+  volatile uint32_t last_current_isr_cycles_ = 0U;
   void ReplyFault();
   void ReplyTlist();
   void ReplyTch();
@@ -347,6 +387,9 @@ class ApplicationController {
 
  private:
   void UpdateUnwrappedPosition();
+  control::CoggingCompensator cogging_;
+  uint32_t cogging_encoder_tick_ = 0U;
+  float cogging_encoder_angle_ = 0.0f;
   float FeedbackPosition() const;
   void ServiceZeroAnchor();
   void ApplyBootCommutation();
@@ -411,6 +454,7 @@ class ApplicationController {
   float applied_max_modulation_ = DEVICE_MAX_MOD_DEFAULT;
   uint8_t applied_decoupling_enable_ = 0U;
   float speed_ref_applied_rad_s_ = 0.0f;
+  float applied_pll_bandwidth_hz_ = control::RotorEstimator::kPllBandwidthHz;
   float active_velocity_ref_rad_s_ = 0.0f;
   float active_position_ref_rad_ = 0.0f;
   float active_accel_ref_rad_s2_ = 0.0f;
@@ -720,6 +764,7 @@ void ApplicationController::ClearFaults() {
 /* Latch `fault` and, the first time that bit sets, copy a short snapshot
  * before any later Disable() changes mode or current. */
 void ApplicationController::NoteFault(safety::Fault fault) {
+  if (audio::Global().binary()) audio::Global().abortSafety(audio::Reason::SafetyFault);
   const uint32_t bit = static_cast<uint32_t>(fault);
   const uint32_t before = fault_manager_.latchedFaults();
   fault_manager_.setFault(fault);
@@ -914,6 +959,7 @@ void ApplicationController::ResetOuterLoopRamps() {
 }
 
 void ApplicationController::SetAutoEnable(uint8_t enable) {
+  BeforeExternalAudioCommand();
   control_auto_enable = (enable != 0U) ? 1U : 0U;
   if (control_auto_enable != 0U) {
     /* Preserve the current CAN-selected control mode. If none exists, use a
@@ -936,6 +982,7 @@ bool ApplicationController::PositionEncoderReady() const {
 }
 
 void ApplicationController::SetMode(uint8_t mode) {
+  BeforeExternalAudioCommand();
   if (((mode == kModePosition) || (mode == kModeMit)) &&
       !PositionEncoderReady()) {
     /* Do not enter on a stale position target. Also drop a deferred
@@ -1110,7 +1157,21 @@ void ApplicationController::OnCurrentSample(void *context) {
   }
   const uint32_t isr_start_cycles = DWT->CYCCNT;
   self->UpdateRotorInFocIsr(isr_start_cycles);
+  const uint32_t invalid_before=self->foc_.GetState().invalid_sample_count;
+  if (audio::Global().gate() &&
+      (!self->arm_all_ok_ || control_mode_cmd!=kModeCurrent || control_auto_enable ||
+       self->cogging_encoder_tick_==0 ||
+       uint32_t(isr_start_cycles-self->cogging_encoder_tick_)>kEncoderValidWindowCycles)) {
+    audio::Global().abortSafety(audio::Reason::SafetyFault);
+  }
   self->foc_.OnPwmUpdate();
+  if (audio::Global().binary() &&
+      self->foc_.GetState().invalid_sample_count!=invalid_before)
+    audio::Global().abortSafety(audio::Reason::SafetyFault);
+  if (audio::Global().stopRequested()) {
+    self->foc_.Enable(0);
+    HAL_GPIO_WritePin(DRV_ENABLE_GPIO_Port,DRV_ENABLE_Pin,GPIO_PIN_RESET);
+  }
 
   if (++self->encoder_trigger_divider_ >= kEncoderTriggerDivider) {
     self->encoder_trigger_divider_ = 0U;
@@ -1118,6 +1179,7 @@ void ApplicationController::OnCurrentSample(void *context) {
   }
 
   const uint32_t isr_end_cycles = DWT->CYCCNT;
+  self->last_current_isr_cycles_=isr_end_cycles;
   const uint32_t isr_cycles = isr_end_cycles - isr_start_cycles;
   if (isr_cycles > self->current_isr_max_cycles_) {
     self->current_isr_max_cycles_ = isr_cycles;
@@ -1129,6 +1191,8 @@ void ApplicationController::UpdateRotorInFocIsr(uint32_t now_cycles) {
 
   hardware::EncoderSample sample = {};
   if (encoder_hw_.consumeLatestSample(sample)) {
+    cogging_encoder_tick_ = sample.timestamp_cycles;
+    cogging_encoder_angle_ = sample.angle_rad;
     const float canonical_angle =
         control::MechanicalAngleFromEncoder(
             sample.angle_rad,
@@ -1146,6 +1210,28 @@ void ApplicationController::UpdateRotorInFocIsr(uint32_t now_cycles) {
           control_electrical_zero_rad,
           g_active_pole_pairs);
   foc_.SetDirectElectricalAngle(theta_e);
+  const DeviceConfigData *cfg = DeviceConfig_Live();
+  const auto &foc = foc_.GetState();
+  const bool allowed = cfg->cog_en == 1.0f && foc.enabled != 0U &&
+      foc.open_loop_voltage_enable == 0U && foc.angle_override_enable == 0U &&
+      control::CoggingCompensator::SupportsMode(last_control_mode_) &&
+      rotor_estimator_.state().pll_sample_count != 0U &&
+      static_cast<uint32_t>(now_cycles - cogging_encoder_tick_) <= kEncoderValidWindowCycles &&
+      control::CoggingCompensator::Matches(cfg->cogging, control_encoder_direction,
+                                          g_active_pole_pairs_u8, control_electrical_zero_rad);
+  // Predict from the bounded raw sample; long running must not lose LUT phase
+  // through float round-off in the unwrapped PLL position.
+  float raw_angle = 0.0f;
+  if (allowed) {
+    const float raw_omega = (control_encoder_direction == 0U ? -1.0f : 1.0f) *
+        rotor_estimator_.state().omega_est_rad_s;
+    raw_angle = cogging_encoder_angle_ + raw_omega *
+        (static_cast<float>(now_cycles - cogging_encoder_tick_) / kCpuClockHz);
+  }
+  // Still call update when disallowed: it clears the fade-in state immediately.
+  foc_.SetCoggingFeedforward(cogging_.update(cfg->cogging, raw_angle, allowed,
+                                           cfg->cog_gain, cfg->cog_limit_a,
+                                           control::kFocDtS));
 }
 
 void ApplicationController::Init(ADC_HandleTypeDef *hadc,
@@ -1154,8 +1240,8 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
                                  UART_HandleTypeDef *huart_debug) {
   debug_uart_ = huart_debug;
   g_vofa_uart = huart_debug;
-  g_vofa_rx_head = 0U;
-  g_vofa_rx_tail = 0U;
+  audio::Global().init(AudioStatusSink,nullptr);
+  g_uart_rx_cursor.reset(0,HAL_GetTick());
   pwm_timer_ = htim_pwm;
 
   current_sense_.init(*hadc, hdma_adc1);
@@ -1247,6 +1333,7 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
   last_control_mode_ = kModeIdle; /* force on_mode_enter on first tick */
   last_control_tick_ = HAL_GetTick();
   VofaStartReceive(debug_uart_);
+  g_uart_rx_cursor.reset(UartRxWriteTotal(),HAL_GetTick());
   if (DeviceConfig_CanBaudFallback() != 0U) {
     char buf[64];
     TextBuf t;
@@ -1260,15 +1347,18 @@ void ApplicationController::Init(ADC_HandleTypeDef *hadc,
 }
 
 void ApplicationController::SetCurrentRef(float iq_ref_a) {
+  BeforeExternalAudioCommand();
   control_current_test_iq_ref_a =
       Clamp(iq_ref_a, -IQ_HARD_MAX_A, IQ_HARD_MAX_A);
 }
 
 void ApplicationController::SetSpeedRef(float velocity_ref_rad_s) {
+  BeforeExternalAudioCommand();
   control_velocity_ref_rad_s = velocity_ref_rad_s;
 }
 
 void ApplicationController::SetPositionRef(float position_target_rad) {
+  BeforeExternalAudioCommand();
   const float delta = position_target_rad - control_position_target_rad;
   control_position_target_rad = position_target_rad;
   trajectory_.setTarget(position_target_rad);
@@ -1285,6 +1375,7 @@ void ApplicationController::SetMitCommand(float pos_rad,
                                           float kp,
                                           float kd,
                                           float iq_ff_a) {
+  BeforeExternalAudioCommand();
   control_mit_pos_rad = pos_rad;
   control_mit_vel_rad_s = vel_rad_s;
   control_mit_kp = kp < 0.0f ? 0.0f : kp;
@@ -1295,9 +1386,33 @@ void ApplicationController::SetMitCommand(float pos_rad,
 }
 
 void ApplicationController::Disable() {
+  if(audio::Global().binary() || g_audio_exit_draining)control_auto_enable=0;
+  if (!audio_internal_stop_ && audio::Global().binary())
+    audio::Global().abortSafety(audio::Reason::Cancelled);
+  const bool previous=audio_internal_stop_;audio_internal_stop_=true;
   SetMode(kModeIdle);
   // STOP must remove PWM immediately, not wait for the next scheduled update.
   DisarmPowerStage();
+  audio_internal_stop_=previous;
+}
+void ApplicationController::StopAudioMotion() {
+  const bool previous=audio_internal_stop_;audio_internal_stop_=true;
+  control_auto_enable=0;
+  Disable();audio_internal_stop_=previous;
+}
+bool ApplicationController::CurrentSampleFresh() const {
+  const uint32_t sample=last_current_isr_cycles_;
+  const uint32_t now=DWT->CYCCNT;
+  return sample!=0 && uint32_t(now-sample)<=kEncoderValidWindowCycles;
+}
+void ApplicationController::BeforeExternalAudioCommand() {
+  const auto state=audio::Global().status().state;
+  if (audio::Global().binary() && !audio_internal_stop_ &&
+      state!=audio::State::Halted && state!=audio::State::Fault && state!=audio::State::Exited) {
+    audio::Global().abortSafety(audio::Reason::ModeChanged);
+    (void)audio::Global().takeStopRequest();
+    StopAudioMotion();
+  }
 }
 
 uint32_t ApplicationController::GetLatchedFaults() const {
@@ -1343,7 +1458,7 @@ void ApplicationController::ApplyIdentResultIfReady() {
 namespace {
 
 constexpr const char *kFirmwareName = "DR4310";
-constexpr const char *kFirmwareVersion = "3.2.0";
+constexpr const char *kFirmwareVersion = "3.4.7";
 
 /* Index order is the default VOFA map. Slots 0..15 stay the historical frame.
  * 28 OlBudget is optional; the default 16-channel map does not include it.
@@ -1353,7 +1468,7 @@ const char *const kTelemNames[DEVICE_TELEM_CHANNEL_COUNT] = {
     "VqSat", "Vbus",   "Vsat",  "Omega",   "DutyA",   "DutyB",   "DutyC",
     "CurKp", "CurKi",  "Ia",    "Ib",      "Ic",      "Vd",      "Vq",
     "Rpm",   "PosRad", "ElecAngle", "Power", "IqLimit", "Fault", "Mode",
-    "OlBudget"};
+    "OlBudget", "EncRad", "CogIq"};
 
 control::OverloadConfig OverloadConfigFromParams() {
   control::OverloadConfig cfg;
@@ -1423,6 +1538,7 @@ int ParseModeToken(const char *tok) {
 }  // namespace
 
 bool ApplicationController::Reply(const TextBuf &text) {
+  if (audio::Global().binary() || g_audio_exit_draining) return false;
   if (text.len == 0U) {
     return true;
   }
@@ -1513,7 +1629,7 @@ void ApplicationController::ServiceGetStream() {
 }
 
 void ApplicationController::ReplyInfo() {
-  char buf[640];
+  char buf[704];
   TextBuf t;
   Text_Init(&t, buf, sizeof(buf));
   const DeviceConfigData *cfg = DeviceConfig_Live();
@@ -1556,6 +1672,29 @@ void ApplicationController::ReplyInfo() {
       Text_Float(&t, ol.budget_s);
     }
   }
+  Text_Str(&t, " flavor=");Text_Str(&t,DR4310_AUDIO_ENABLED?"music":"standard");
+  Text_Str(&t, " audio=");Text_U32(&t,DR4310_AUDIO_ENABLED);
+  Text_Str(&t, " foc_opt=");Text_U32(&t,DR4310_FOC_OPTIMIZE);
+  Text_Str(&t, " fast_angle=");Text_U32(&t,DR4310_FAST_ANGLE_WRAP);
+  Text_Str(&t, " adc_ht=");Text_U32(&t,DR4310_ADC_HALF_IRQ);
+  Text_Str(&t, " enc_ht=");Text_U32(&t,DR4310_ENCODER_HALF_IRQ);
+  Text_Str(&t, " irq_prof=");Text_U32(&t,DR4310_IRQ_PROFILE);
+  Text_Str(&t, " pwm_hz=");Text_U32(&t,DR4310_FOC_HZ);
+  Text_Str(&t," uart_baud=");Text_U32(&t,DEVICE_UART_BAUD);
+#if DR4310_AUDIO_ENABLED
+  Text_Str(&t," audio_qmax_ma=");Text_U32(&t,audio::kQMaxAmplitudeMa);
+  Text_Str(&t," audio_dmax_ma=");Text_U32(&t,audio::kDMaxAmplitudeMa);
+  Text_Str(&t," audio_low_tx=");Text_U32(&t,audio::kLowTxMode?1:0);
+#endif
+  Text_Str(&t, " rx_overruns=");Text_U32(&t,g_uart_rx_cursor.overruns());
+  Text_Str(&t," rx_overwrites=");Text_U32(&t,g_uart_rx_cursor.overwrites());
+  Text_Str(&t," rx_late=");Text_U32(&t,g_uart_rx_cursor.late());
+  Text_Str(&t," rx_span=");Text_U32(&t,g_uart_rx_cursor.lastDistance());
+  Text_Str(&t," rx_gap_ms=");Text_U32(&t,g_uart_rx_cursor.lastGapMs());
+  Text_Str(&t," rx_irq_lost=");Text_U32(&t,g_uart_rx_irq_losses);
+  Text_Str(&t," uart_errors=");Text_U32(&t,g_uart_rx_hw_errors);
+  Text_Str(&t," uart_errbits=");Text_U32(&t,g_uart_rx_last_hw_error);
+  Text_Str(&t," tx_start_fail=");Text_U32(&t,g_uart_tx_start_failures);
   Text_Char(&t, '\n');
   Reply(t);
 }
@@ -1669,6 +1808,7 @@ void ApplicationController::ApplyBootMode() {
 }
 
 void ApplicationController::CheckHostTimeout(uint32_t now) {
+  if (audio::Global().binary() || g_audio_exit_draining) return;
   const uint16_t timeout = DeviceConfig_Live()->cmd_timeout_ms;
   if ((timeout == 0U) || (host_seen_ == 0U) || (control_auto_enable != 0U) ||
       (control_mode_cmd == kModeIdle) || (control_mode_cmd == kModeCalibrate)) {
@@ -1698,6 +1838,131 @@ void ApplicationController::ServiceReboot(uint32_t now) {
   }
 }
 
+void ApplicationController::ExecuteCoggingCommand(char **tok, size_t n) {
+  const char *sub = n > 1U ? tok[1] : "INFO";
+  auto is = [sub](const char *name) { return std::strcmp(sub, name) == 0; };
+  char buf[256];
+  TextBuf t;
+  Text_Init(&t, buf, sizeof(buf));
+  const DeviceConfigData *cfg = DeviceConfig_Live();
+  if (is("INFO") && n <= 2U) {
+    Text_Str(&t, "valid="); Text_U32(&t, cfg->cogging.valid);
+    Text_Str(&t, " enabled="); Text_U32(&t, cfg->cog_en == 1.0f ? 1U : 0U);
+    Text_Str(&t, " upload="); Text_U32(&t, DeviceConfig_CoggingUploading() ? 1U : 0U);
+    Text_Str(&t, " written="); Text_U32(&t, DeviceConfig_CoggingWritten());
+    Text_Str(&t, " size="); Text_U32(&t, COGGING_TABLE_SIZE);
+    Text_Str(&t, " match="); Text_U32(&t, control::CoggingCompensator::Matches(
+        cfg->cogging, control_encoder_direction, g_active_pole_pairs_u8,
+        control_electrical_zero_rad) ? 1U : 0U);
+    Text_Str(&t, " zero="); Text_Float(&t, control_electrical_zero_rad);
+    Text_Str(&t, " dir="); Text_U32(&t, control_encoder_direction);
+    Text_Str(&t, " pp="); Text_U32(&t, g_active_pole_pairs_u8);
+    Text_Str(&t, " crc=0x"); Text_Hex(&t, StoreRecord_Crc32(
+        reinterpret_cast<const uint8_t *>(cfg->cogging.current_ma),
+        sizeof(cfg->cogging.current_ma)), 8U);
+    ReplyOk("COG", buf);
+    return;
+  }
+  if (is("GET") && n == 3U) {
+    float index;
+    if (!Ascii_ParseFloat(tok[2], &index) || index < 0.0f ||
+        index >= COGGING_TABLE_SIZE || std::floor(index) != index) {
+      ReplyErr("COG", "index"); return;
+    }
+    const auto i = static_cast<uint16_t>(index);
+    Text_Str(&t, "index="); Text_U32(&t, i);
+    Text_Str(&t, " ma="); Text_I32(&t, cfg->cogging.current_ma[i]);
+    ReplyOk("COG", buf);
+    return;
+  }
+  if (!IsMotorIdle()) { ReplyErr("COG", "not_idle"); return; }
+  if (is("BEGIN") && n == 2U) {
+    DeviceConfig_CoggingBegin();
+    ReplyOk("COG", "begin ram_only");
+  } else if ((is("CLEAR") || is("ABORT")) && n == 2U) {
+    DeviceConfig_CoggingClear();
+    ReplyOk("COG", "cleared ram_only");
+  } else if (is("COMMIT") && n == 2U) {
+    if (!DeviceConfig_CoggingCommit(control_electrical_zero_rad,
+                                    control_encoder_direction, g_active_pole_pairs_u8)) {
+      ReplyErr("COG", "incomplete"); return;
+    }
+    ReplyOk("COG", "committed enabled=0 saved=0");
+  } else if (is("SET") && n >= 4U && n <= 19U) {
+    float start;
+    if (!Ascii_ParseFloat(tok[2], &start) || start < 0.0f ||
+        start >= COGGING_TABLE_SIZE || std::floor(start) != start) {
+      ReplyErr("COG", "index"); return;
+    }
+    int16_t values[16] = {};
+    for (size_t i = 3U; i < n; ++i) {
+      float value;
+      if (!Ascii_ParseFloat(tok[i], &value) || value < -COGGING_SAMPLE_MAX_MA ||
+          value > COGGING_SAMPLE_MAX_MA || std::floor(value) != value) {
+        ReplyErr("COG", "sample_range"); return;
+      }
+      values[i - 3U] = static_cast<int16_t>(value);
+    }
+    if (!DeviceConfig_CoggingSet(static_cast<uint16_t>(start), values, n - 3U)) {
+      ReplyErr("COG", "upload_range"); return;
+    }
+    Text_Str(&t, "written="); Text_U32(&t, DeviceConfig_CoggingWritten());
+    ReplyOk("COG", buf);
+  } else {
+    ReplyErr("COG", "usage_INFO_BEGIN_SET_GET_COMMIT_CLEAR_ABORT");
+  }
+}
+
+void ApplicationController::ExecuteAudioCommand(char **tok,size_t n) {
+#if DR4310_AUDIO_ENABLED
+  if(n!=4 || std::strcmp(tok[1],"OPEN")!=0 ||
+     (std::strcmp(tok[2],"Q")!=0 && std::strcmp(tok[2],"D")!=0)) {
+    ReplyErr("AUDIO","bad_arg");return;
+  }
+  uint32_t amp=0;
+  const uint32_t max_amp=std::strcmp(tok[2],"Q")==0?audio::kQMaxAmplitudeMa:audio::kDMaxAmplitudeMa;
+  if(!*tok[3]){ReplyErr("AUDIO","bad_arg");return;}
+  for(const char *p=tok[3];*p;++p){
+    if(*p<'0'||*p>'9'||amp>max_amp){ReplyErr("AUDIO","bad_arg");return;}
+    amp=amp*10+uint32_t(*p-'0');
+  }
+  if(amp<1||amp>max_amp){ReplyErr("AUDIO","bad_arg");return;}
+  if(audio::Global().binary() || g_audio_exit_draining || get_stream_index_>=0 ||
+     reboot_pending_ || DeviceConfig_CoggingUploading() || !UartTxIdle()) {
+    ReplyErr("AUDIO","busy");return;
+  }
+  if(fault_manager_.hasLatchedFault()){ReplyErr("AUDIO","fault");return;}
+  const auto &f=foc_.GetState();
+  if(control_mode_cmd!=kModeCurrent || telemetry_.control_mode!=kModeCurrent ||
+     control_auto_enable || f.open_loop_voltage_enable || control_align_enable ||
+     control_ident_enable || control_calibrate_enable ||
+     std::fabs(control_current_test_iq_ref_a)>=.001f || std::fabs(f.iq_ref_a)>=.05f) {
+    ReplyErr("AUDIO","bad_state");return;
+  }
+  if(!calibration_flash_valid || !arm_all_ok_ || !f.enabled || !encoder_valid_ || !CurrentSampleFresh()) {
+    ReplyErr("AUDIO","not_ready");return;
+  }
+  if(DeviceConfig_Live()->telemetry || float(amp)/1000.0f>control_iq_limit_a ||
+     !std::isfinite(f.id_a) || !std::isfinite(f.iq_a) ||
+     std::fabs(f.id_a)>IQ_HARD_MAX_A || std::fabs(f.iq_a)>IQ_HARD_MAX_A) {
+    ReplyErr("AUDIO","safety");return;
+  }
+  const uint16_t sid=audio::Global().open(std::strcmp(tok[2],"Q")==0?audio::Axis::Q:audio::Axis::D,uint16_t(amp),HAL_GetTick());
+  char buf[128];TextBuf t;Text_Init(&t,buf,sizeof(buf));
+  Text_Str(&t,"@OK AUDIO OPEN v=1 sid=");Text_U32(&t,sid);
+  Text_Str(&t," rate=8000 bits=16 cap=");Text_U32(&t,audio::kPcmCapacity);
+  Text_Str(&t," guard=128 prefill=800 window=");Text_U32(&t,audio::kWindow);Text_Str(&t,"\n");
+  // Binary RX is ready before OK, and FIFO order puts OK before all STATUS.
+  if(!UartTxEnqueue(reinterpret_cast<const uint8_t *>(buf),t.len,kUartTxQueueBytes-1)) {
+    audio::Global().abortSafety(audio::Reason::ProtocolError);StopAudioMotion();
+  }
+  vofa_command_length_=0;vofa_line_overflow_=0;
+#else
+  (void)tok;(void)n;
+  ReplyErr("AUDIO","disabled");
+#endif
+}
+
 void ApplicationController::ExecuteVofaCommand(char *line) {
   if (line == nullptr) {
     return;
@@ -1714,6 +1979,11 @@ void ApplicationController::ExecuteVofaCommand(char *line) {
     return;
   }
   NotifyHostActivity();
+  if (std::strcmp(cmd,"AUDIO")==0) { ExecuteAudioCommand(tok,n);return; }
+  if (std::strcmp(cmd, "COG") == 0) {
+    ExecuteCoggingCommand(tok, n);
+    return;
+  }
   auto is = [cmd](const char *name) { return std::strcmp(cmd, name) == 0; };
   float v[kUartMaxTokens] = {};
   size_t nv = 0U;
@@ -1740,7 +2010,11 @@ void ApplicationController::ExecuteVofaCommand(char *line) {
     return;
   }
   if (is("HELP")) {
-    ReplyOk("HELP", "STOP RUN ZERO CLEAR CALIB IQ KP KI CUR SPD POS MIT MODE AE TELEM PING INFO GET SET SAVE DEFAULTS RELOAD REBOOT SETZERO TLIST TCH TRATE FAULT");
+#if DR4310_AUDIO_ENABLED
+    ReplyOk("HELP", "STOP RUN ZERO CLEAR CALIB IQ KP KI CUR SPD POS MIT MODE AE TELEM PING INFO GET SET SAVE DEFAULTS RELOAD REBOOT SETZERO TLIST TCH TRATE FAULT COG AUDIO");
+#else
+    ReplyOk("HELP", "STOP RUN ZERO CLEAR CALIB IQ KP KI CUR SPD POS MIT MODE AE TELEM PING INFO GET SET SAVE DEFAULTS RELOAD REBOOT SETZERO TLIST TCH TRATE FAULT COG");
+#endif
     return;
   }
   if (is("INFO")) {
@@ -1779,6 +2053,7 @@ void ApplicationController::ExecuteVofaCommand(char *line) {
   }
   if (is("SAVE")) {
     if (!IsMotorIdle()) { ReplyErr("SAVE", "not_idle"); return; }
+    if (DeviceConfig_CoggingUploading()) { ReplyErr("SAVE", "cog_incomplete"); return; }
     const int bad = DeviceConfig_FirstInvalidParam();
     if (bad >= 0) {
       Text_Str(&d, "range "); Text_Str(&d, DeviceConfig_ParamInfo(static_cast<size_t>(bad))->key);
@@ -2038,8 +2313,37 @@ void ApplicationController::ExecuteVofaCommand(char *line) {
 }
 
 void ApplicationController::ProcessVofaCommands() {
+  if(g_uart_rx_errors) {
+    const uint32_t mask=__get_PRIMASK();__disable_irq();const uint32_t errors=g_uart_rx_errors;g_uart_rx_errors=0;__set_PRIMASK(mask);
+    vofa_command_length_=0;vofa_line_overflow_=0;
+    g_uart_rx_cursor.reset(UartRxWriteTotal(),HAL_GetTick());
+    audio::Global().resetReceiver();
+    if(audio::Global().binary()) {
+      if(!audio::kLowTxMode || (errors&1U) || audio::Global().stopRequested()){
+        audio::Global().abortSafety(audio::Reason::ProtocolError);StopAudioMotion();
+      }
+    } else ReplyErr("LINE","rx_overrun");
+  }
+  if(!g_uart_rx_ready) VofaStartReceive(debug_uart_);
+  if(g_audio_exit_draining) {
+    if(!UartTxIdle()){g_uart_rx_cursor.reset(UartRxWriteTotal(),HAL_GetTick());return;}
+    g_audio_exit_draining=false;vofa_command_length_=0;vofa_line_overflow_=0;NotifyHostActivity();
+  }
   uint8_t byte = 0U;
   while (VofaRxPop(byte)) {
+    if(audio::Global().binary()) {
+      audio::Global().receive(byte,HAL_GetTick());
+      if(audio::Global().takeStopRequest())StopAudioMotion();
+      if(!audio::Global().binary()) {
+        g_audio_exit_draining=true;
+        g_uart_rx_cursor.reset(UartRxWriteTotal(),HAL_GetTick());
+        vofa_command_length_=0;vofa_line_overflow_=0;break;
+      }
+      continue;
+    }
+    if(audio::Global().discardBinaryInAscii(byte,HAL_GetTick())) {
+      vofa_command_length_=0;vofa_line_overflow_=0;continue;
+    }
     if ((byte == '\r') || (byte == '\n')) {
       if (vofa_line_overflow_ != 0U) {
         vofa_line_overflow_ = 0U;
@@ -2068,6 +2372,7 @@ void ApplicationController::ProcessVofaCommands() {
 }
 
 void ApplicationController::SendVofaDebug() {
+  if(audio::Global().binary() || g_audio_exit_draining) return;
   if (debug_uart_ == nullptr) {
     return;
   }
@@ -2141,6 +2446,8 @@ float ApplicationController::TelemValue(uint8_t index,
     case 26U: return static_cast<float>(fault_manager_.latchedFaults() & 0xFFFFU);
     case 27U: return static_cast<float>(telemetry_.control_mode);
     case 28U: return overload_.status().budget_s;
+    case 29U: return encoder_.angle_rad;
+    case 30U: return foc.cogging_iq_a;
     default: return 0.0f;
   }
 }
@@ -2312,9 +2619,8 @@ void ApplicationController::Update() {
   BusWindow(&bus_min_v, &bus_max_v);
   foc_.SetMinBusVoltage(bus_min_v);
   identifier_.SetMinBusV(bus_min_v);
-  if (arm_bus_v < bus_min_v) {
-    NoteFault(safety::Fault::BusUndervoltage);
-  } else if (arm_bus_v > bus_max_v) {
+  /* Bus undervoltage fault removed: DRV8313 has built-in UVLO. */
+  if (arm_bus_v > bus_max_v) {
     NoteFault(safety::Fault::BusOvervoltage);
   }
   telemetry_.fault_flags = fault_manager_.latchedFaults();
@@ -2325,6 +2631,17 @@ void ApplicationController::Update() {
       (arm_encoder_ok_ != 0U) && (arm_sense_ok_ != 0U) &&
       (arm_no_fault_ != 0U) && (bus_ok_ms_ >= kBusOkSettleMs);
   arm_all_ok_ = arm_all_ok ? 1U : 0U;
+  const bool audio_was_binary=audio::Global().binary();
+  if(audio::Global().gate() && !CurrentSampleFresh())NoteFault(safety::Fault::CurrentSense);
+  const bool audio_safe=arm_all_ok && control_mode_cmd==kModeCurrent &&
+      !control_auto_enable && !foc_snap.open_loop_voltage_enable &&
+      CurrentSampleFresh() && std::fabs(control_current_test_iq_ref_a)<.001f && std::fabs(foc_snap.iq_ref_a)<.05f;
+  audio::Global().service(now,audio_safe,uint16_t(fault_manager_.latchedFaults()));
+  if(audio::Global().takeStopRequest())StopAudioMotion();
+  if(audio_was_binary && !audio::Global().binary()) {
+    g_audio_exit_draining=true;g_uart_rx_cursor.reset(UartRxWriteTotal(),now);
+    vofa_command_length_=0;vofa_line_overflow_=0;
+  }
   if (arm_all_ok) {
     power_stage_armed_ = 1U;
   }
@@ -2403,7 +2720,17 @@ void ApplicationController::Update() {
   }
 
   float iq_preclamp = 0.0f;
-  const float mech_vel = speed_feedback_estimator_.state().velocity_rad_s;
+  if (control_pll_bandwidth_hz != applied_pll_bandwidth_hz_) {
+    applied_pll_bandwidth_hz_ = control_pll_bandwidth_hz;
+    rotor_estimator_.setPllParams(Clamp(applied_pll_bandwidth_hz_, 5.0f, 400.0f),
+                                  control::RotorEstimator::kPllDamping);
+  }
+  /* Same canonical mechanical angle/sign as speed_feedback_estimator_; fall
+   * back to the window difference until the PLL has seen a sample. */
+  const bool use_pll_fb = (control_speed_fb_pll != 0U) &&
+                          (rotor_estimator_.state().pll_sample_count != 0U);
+  const float mech_vel = use_pll_fb ? rotor_estimator_.state().omega_est_rad_s
+                                    : speed_feedback_estimator_.state().velocity_rad_s;
   if (control_mode == kModeSpeed) {
     telemetry_.speed_branch_exec_count++;
     const uint16_t spd_ms = DeviceConfig_Live()->spd_ramp_ms;
@@ -2484,8 +2811,11 @@ void ApplicationController::Update() {
 
   /* Demand is the larger of the pre-clamp command and the measured Iq.
    * foc_snap.iq_a is the live FOC state, not a copy from the top of Update. */
+  const float audio_peak=audio::Global().gate()?audio::Global().amplitudeA():0.0f;
   const float ol_demand =
-      std::max(std::fabs(iq_preclamp), std::fabs(foc_snap.iq_a));
+      std::max(std::fabs(iq_preclamp +
+          (control::CoggingCompensator::SupportsMode(control_mode) ? foc_snap.cogging_iq_a : 0.0f))+audio_peak,
+          audio_peak>0 ? std::sqrt(foc_snap.id_a*foc_snap.id_a+foc_snap.iq_a*foc_snap.iq_a) : std::fabs(foc_snap.iq_a));
   const control::OverloadStatus ol_status =
       overload_.step(ol_cfg, ol_demand, kControlDtS);
   if (ol_status.effective_a != applied_iq_limit_a_) {
@@ -2709,7 +3039,7 @@ void ApplicationController::Update() {
     ArmPowerStage();
     foc_.SetAngleOverride(0U, electrical_angle);
     foc_.SetOpenLoopVoltage(0U, 0.0f, 0.0f);
-    foc_.SetRefs(0.0f, iq_ref);
+    foc_.SetRefs(0.0f, iq_preclamp);
   } else {
     DisarmPowerStage();
     foc_.SetAngleOverride(0U, electrical_angle);
@@ -2822,15 +3152,39 @@ extern "C" void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
 
 extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
   if (huart == app::g_vofa_uart) {
-    app::VofaRxPushFromIsr(app::g_vofa_rx_byte);
-    app::VofaStartReceive(huart);
+    ++app::g_uart_rx_halves;
   }
+}
+extern "C" void HAL_UART_RxHalfCpltCallback(UART_HandleTypeDef *huart) {
+  if(huart==app::g_vofa_uart)++app::g_uart_rx_halves;
+}
+extern "C" void ControlApp_UartRxOverrunISR(void) {
+  ++app::g_uart_rx_irq_losses;
+  app::g_uart_rx_errors|=1U;
+  audio::Global().abortSafety(audio::Reason::ProtocolError);
+  if(audio::Global().binary())HAL_GPIO_WritePin(DRV_ENABLE_GPIO_Port,DRV_ENABLE_Pin,GPIO_PIN_RESET);
+}
+extern "C" uint8_t ControlApp_AudioActive(void) {
+  return (audio::Global().binary() || app::g_audio_exit_draining)?1U:0U;
 }
 
 extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
   if (huart == app::g_vofa_uart) {
-    app::g_vofa_tx_busy = 0U;
-    app::VofaStartReceive(huart);
+    app::g_uart_rx_ready=0U;
+    ++app::g_uart_rx_hw_errors;
+    app::g_uart_rx_last_hw_error=huart->ErrorCode;
+    app::g_uart_rx_errors|=2U;
+    // In low-TX mode, a single framing/noise error should not kill the audio
+    // session. The DMA is restarted by the main loop; the CRC check and
+    // underrun watchdog handle any corrupted or missing DATA frames.
+    const uint32_t recoverable=HAL_UART_ERROR_NE|HAL_UART_ERROR_FE;
+    const bool recover=audio::kLowTxMode && huart->ErrorCode && !(huart->ErrorCode&~recoverable);
+    if(!recover){
+      audio::Global().abortSafety(audio::Reason::ProtocolError);
+      if(audio::Global().binary())HAL_GPIO_WritePin(DRV_ENABLE_GPIO_Port,DRV_ENABLE_Pin,GPIO_PIN_RESET);
+    }
+    // HAL has aborted RX DMA. Main clears parser/cursor state before restart;
+    // restarting here could expose a new producer to the old main-loop cursor.
   }
 }
 

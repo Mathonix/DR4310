@@ -25,6 +25,7 @@
 #include "gm6020_can.h"
 #include "device_config.h"
 #include "iq_limits.h"
+#include "foc_timing.h"
 #include <string.h>
 
 /* USER CODE END Includes */
@@ -669,11 +670,12 @@ static void MX_TIM1_Init(void)
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 0;
-  /* Center-aligned: f_pwm = TIMCLK / (2*(ARR+1)) = 170M / (2*4250) = 20 kHz */
+  /* Center-aligned: f_pwm = TIMCLK / (2*(ARR+1)). ARR comes from foc_timing.h. */
   htim1.Init.CounterMode = TIM_COUNTERMODE_CENTERALIGNED1;
-  htim1.Init.Period = 4249;
+  htim1.Init.Period = DR4310_PWM_ARR;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  /* RCR=1: one Update per full up-down cycle → 20 kHz ISR (not 40 kHz). */
+  /* RCR=1: one update per carrier. The current loop follows the CH4 strobe,
+   * which is also once per carrier, so PWM and the current loop match. */
   htim1.Init.RepetitionCounter = 1;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
@@ -710,9 +712,9 @@ static void MX_TIM1_Init(void)
   /*
    * CH4 is not routed to a pin. Small CCR produces OC4REF near the PWM valley
    * once per full up-down period (with RCR=1), used only as ADC sample strobe.
-   * Pulse = 80 is ~471 ns before the valley. Phase current is inline
-   * (R12/R13), so this strobe does not need a low-side conduction window.
-   * At kDutyMax 0.995 the phase edges stay ~24 us away from the strobe.
+   * Pulse = 80 is ~471 ns before the valley at 170 MHz. Phase current is
+   * inline (R12/R13), so this strobe does not need a low-side conduction
+   * window. At kDutyMax 0.995 and 40 kHz the phase edges stay ~12 us away.
    */
   sConfigOC.Pulse = 80;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
@@ -762,7 +764,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = DEVICE_UART_BAUD;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -1491,10 +1493,11 @@ static void CAN_ApplyControlFrame(uint32_t id, const uint8_t *data)
     return;
   }
 
-  /* In automatic-enable mode, CAN cannot explicitly disable the motor.
-   * Setpoint and control-mode commands remain accepted. */
+  /* Preserve the legacy automatic-enable policy outside audio. During an
+   * audio session or EXIT drain, CAN DISABLE/ESTOP must always reach Disable. */
   if ((ControlApp_GetAutoEnable() != 0U) &&
-      ((cmd == CAN_CMD_DISABLE) || (cmd == CAN_CMD_ESTOP)))
+      ((cmd == CAN_CMD_DISABLE) || (cmd == CAN_CMD_ESTOP)) &&
+      (ControlApp_AudioActive() == 0U))
   {
     can_control_rx_count++;
     return;

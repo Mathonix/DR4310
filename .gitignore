@@ -54,6 +54,29 @@
 !/startup_stm32g431xx.s
 
 # Board and application sources
+!/CLAUDE.md
+!/Core/Inc/dma_irq_profile.h
+!/Core/Src/dma_irq_profile.c
+!/Libraries/Hardware/inc/DmaIrqControls.h
+!/Libraries/Control/inc/AngleWrap.hpp
+!/Libraries/Control/inc/foc_timing.h
+!/Libraries/Control/inc/CoggingCompensator.hpp
+!/Libraries/Control/inc/cogging_types.h
+!/Libraries/Control/inc/AudioCurrent.hpp
+!/Libraries/Control/src/cogging_compensator.cpp
+!/Libraries/App/inc/motor_audio.h
+!/Libraries/App/inc/uart_dma_cursor.h
+!/tools/cogging_calibrate.py
+!/tests/__init__.py
+!/tests/test_angle_wrap.cpp
+!/tests/test_electrical_zero.cpp
+!/tests/test_foc_numeric.cpp
+!/tests/test_foc_offline.py
+!/tests/test_standard_firmware.py
+!/tests/test_rotor_estimator.cpp
+!/tests/test_cogging_compensator.cpp
+!/tests/test_dma_irq_controls.py
+!/docs/MAIN_20KHZ_IRQ_OPTIMIZATION.md
 !/Core/Inc/main.h
 !/Core/Inc/stm32g4xx_hal_conf.h
 !/Core/Inc/stm32g4xx_it.h

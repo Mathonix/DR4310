@@ -1,4 +1,5 @@
 #include "RotorEstimator.hpp"
+#include "AngleWrap.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -7,8 +8,6 @@
 namespace control {
 
 namespace {
-constexpr float kTwoPi = 6.28318530718f;
-constexpr float kPi = 3.14159265359f;
 constexpr float kVelocityFilterAlpha = 1.0f;
 constexpr float kMinDt = 1.0e-6f;
 constexpr float kMinSampleDtS = 1.0e-6f;
@@ -18,13 +17,7 @@ constexpr float kCyclesPerUs = 170.0f;
 }
 
 float RotorEstimator::WrapDelta(float delta) {
-  delta = std::fmod(delta, kTwoPi);
-  if (delta > kPi) {
-    delta -= kTwoPi;
-  } else if (delta < -kPi) {
-    delta += kTwoPi;
-  }
-  return delta;
+  return angle::WrapPmPi(delta);
 }
 
 void RotorEstimator::reset(float angle_rad) {

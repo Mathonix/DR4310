@@ -1,19 +1,10 @@
 #include "ElectricalAngle.hpp"
-
-#include <cmath>
+#include "AngleWrap.hpp"
 
 namespace control {
 
-namespace {
-constexpr float kTwoPi = 6.28318530718f;
-}
-
 float Wrap0To2Pi(float angle) {
-  angle = std::fmod(angle, kTwoPi);
-  if (angle < 0.0f) {
-    angle += kTwoPi;
-  }
-  return angle;
+  return angle::Wrap0To2Pi(angle);
 }
 
 float MechanicalAngleFromEncoder(float encoder_angle_rad,

@@ -119,6 +119,8 @@ uint32_t ControlApp_GetLatchedFaults(void);
 /* Any valid host command (UART line, native CAN frame, GM6020 frame) feeds
  * the optional command-timeout watchdog (config key TIMEOUT_MS). */
 void ControlApp_NotifyHostActivity(void);
+void ControlApp_UartRxOverrunISR(void);
+uint8_t ControlApp_AudioActive(void);
 
 /* Primary mode selector (CTRL_MODE_*). */
 extern volatile uint8_t control_mode_cmd;

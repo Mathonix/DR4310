@@ -1,4 +1,5 @@
 #include "MT6701.hpp"
+#include "DmaIrqControls.h"
 
 #include <algorithm>
 
@@ -214,6 +215,7 @@ bool MT6701::startReadDma() {
     ResetSpiToReady();
     return false;
   }
+  DmaIrq_ConfigureEncoderRx(&hdma_spi3_rx);
   return true;
 }
 

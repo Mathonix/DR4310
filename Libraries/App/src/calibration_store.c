@@ -10,24 +10,20 @@ static int sequence_after(uint32_t lhs, uint32_t rhs) {
 }
 
 static int read_slot(uint32_t address, StoreImage *image) {
-  uint8_t raw[STORE_RECORD_MAX_BYTES];
-  memcpy(raw, (const void *)address, sizeof(raw));
-  return StoreRecord_Decode(raw, sizeof(raw), image);
+  return StoreRecord_Decode((const uint8_t *)(uintptr_t)address, STORE_RECORD_MAX_BYTES, image);
 }
 
 static int newest_record(StoreImage *newest, uint32_t *newest_slot) {
-  StoreImage slot0;
-  StoreImage slot1;
-  const int valid0 = read_slot(CALIBRATION_STORE_SLOT0_ADDRESS, &slot0);
-  const int valid1 = read_slot(CALIBRATION_STORE_SLOT1_ADDRESS, &slot1);
+  StoreImage candidate;
+  const int valid0 = read_slot(CALIBRATION_STORE_SLOT0_ADDRESS, newest);
+  const int valid1 = read_slot(CALIBRATION_STORE_SLOT1_ADDRESS, &candidate);
   if (!valid0 && !valid1) {
     return 0;
   }
-  if (valid1 && (!valid0 || sequence_after(slot1.sequence, slot0.sequence))) {
-    *newest = slot1;
+  if (valid1 && (!valid0 || sequence_after(candidate.sequence, newest->sequence))) {
+    *newest = candidate;
     *newest_slot = 1U;
   } else {
-    *newest = slot0;
     *newest_slot = 0U;
   }
   return 1;
@@ -43,7 +39,6 @@ int StoreImage_Load(StoreImage *image) {
 
 int StoreImage_Save(const StoreImage *image, uint32_t *saved_sequence) {
   StoreImage previous;
-  StoreImage verify;
   uint8_t record[STORE_RECORD_MAX_BYTES];
   uint32_t previous_slot = 1U;
   uint32_t page_error = 0U;
@@ -85,8 +80,8 @@ int StoreImage_Save(const StoreImage *image, uint32_t *saved_sequence) {
   }
   (void)HAL_FLASH_Lock();
 
-  if ((memcmp((const void *)target_address, record, sizeof(record)) != 0) ||
-      !read_slot(target_address, &verify) || (verify.sequence != sequence)) {
+  if ((memcmp((const void *)(uintptr_t)target_address, record, sizeof(record)) != 0) ||
+      !read_slot(target_address, &previous) || (previous.sequence != sequence)) {
     return 0;
   }
   if (saved_sequence != NULL) {
@@ -123,6 +118,8 @@ int CalibrationStore_Save(const CalibrationStoreData *data,
    * applies ENC_DIR on top of this record, does not undo the calibration. */
   if (image.config_valid != 0U) {
     image.config.enc_dir = (data->encoder_direction != 0U) ? 1U : 0U;
+    image.config.cog_en = 0.0f;
+    image.config.cogging.valid = 0U;
   }
   return StoreImage_Save(&image, saved_sequence);
 }
